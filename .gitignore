@@ -179,3 +179,18 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Never commit API keys or secrets
+*.env
+.env
+*api_key*
+*API_KEY*
+*.key
+
+# Never commit books (copyright)
+*.epub
+*.pdf
+
+# Never commit results/personal data
+*.xlsx
+*.xls
