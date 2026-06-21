@@ -21,11 +21,27 @@ function Find-DriveRoot {
 
     foreach ($drive in $availableDrives) {
         foreach ($folderName in $driveFolderNames) {
+
+            # Case 1: Drive folder sits directly at the root of the disk
+            #   e.g. E:\Mi Unidad\00_Anthropic
             $candidate = Join-Path $drive $folderName
             $candidate = Join-Path $candidate "00_Anthropic"
-
             if (Test-Path $candidate) {
                 return $candidate
+            }
+
+            # Case 2: Drive folder sits inside a user's profile folder
+            #   e.g. C:\Users\Michel\Mi unidad\00_Anthropic
+            $usersPath = Join-Path $drive "Users"
+            if (Test-Path $usersPath) {
+                $userFolders = Get-ChildItem -Path $usersPath -Directory -ErrorAction SilentlyContinue
+                foreach ($userFolder in $userFolders) {
+                    $candidate = Join-Path $userFolder.FullName $folderName
+                    $candidate = Join-Path $candidate "00_Anthropic"
+                    if (Test-Path $candidate) {
+                        return $candidate
+                    }
+                }
             }
         }
     }

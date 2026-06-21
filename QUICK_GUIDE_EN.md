@@ -5,34 +5,49 @@ This is just a quick cheat sheet for when you already know the process.
 
 ---
 
-## 0. Open the right terminal (always the same one)
+## ⚠️ RULE #1 — ALL commands are typed from the repository folder
 
-Open File Explorer → go to the repository folder → right-click inside it →
-**Open in Terminal**
+**Never** from a Google Drive folder (not `_source_intake`, not `Library`, not
+`combinados`). This applies to all 3 steps, always, no exceptions.
 
-```
-C:\Dev\Github\book-processing-pipeline
-```
-or
-```
-E:\Dev\github\book-processing-pipeline
-```
+Before typing ANY `.\stepX_...` command:
+
+1. Open Windows File Explorer
+2. Go to the repository folder:
+   ```
+   C:\Dev\Github\book-processing-pipeline
+   ```
+   or
+   ```
+   E:\Dev\github\book-processing-pipeline
+   ```
+3. Right-click inside it (not inside any subfolder) → **Open in Terminal**
+4. Check that the terminal shows that same path before typing anything
+
+If your terminal shows a path that says `..._source_intake`, `...Library...`, or
+`...combinados...`, **you're in the wrong place** — the commands will fail with
+a "is not recognized as the name of a cmdlet" error. Close that terminal and
+repeat steps 1-4.
 
 ---
 
 ## 1. Convert a new book
 
-1. Put the file in `00_Anthropic\_source_intake\`
-2. Run:
-   ```powershell
-   .\step1_convert.ps1 -BookName "book-name" -SourceFile "Exact Name.epub"
-   ```
-3. Result in: `Library\book-name\01_converted\`
+**Step A — In Windows File Explorer** (not in the terminal):
+Copy the file into `00_Anthropic\_source_intake\`
+
+**Step B — In the terminal, standing in the repository folder** (see Rule #1):
+```powershell
+.\step1_convert.ps1 -BookName "book-name" -SourceFile "Exact Name.epub"
+```
+
+Result in: `Library\book-name\01_converted\`
 
 ---
 
 ## 2. Extract the KB
 
+**In the terminal, standing in the repository folder** (see Rule #1):
 ```powershell
 # Immediate (result right away, more expensive)
 .\step2_extract.ps1 -BookName "book-name" -Mode immediate
@@ -50,13 +65,16 @@ Result in: `Library\book-name\02_kb\`
 
 ## 3. Combine multiple books
 
+**Step A — In Windows File Explorer** (not in the terminal):
 1. Copy the `.md` files you want to combine into `combinados\_staging\`
 2. Rename them with a numeric prefix to set the order: `01_`, `02_`, `03_`...
-3. Run:
-   ```powershell
-   .\step3_combine.ps1 -OutputName "final_name.md"
-   ```
-4. Result in: `combinados\final_name.md` (and `_staging` empties itself)
+
+**Step B — In the terminal, standing in the repository folder** (see Rule #1):
+```powershell
+.\step3_combine.ps1 -OutputName "final_name.md"
+```
+
+Result in: `combinados\final_name.md` (and `_staging` empties itself)
 
 ---
 

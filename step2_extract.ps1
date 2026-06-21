@@ -39,11 +39,18 @@
 .PARAMETER Check
     A Batch ID to check/download (Action 2). When provided, -Mode is ignored.
 
+.PARAMETER Force
+    Re-run the extraction even if a KB file already exists for this book
+    (passes --force through to extract.py, which would otherwise skip it).
+
 .EXAMPLE
     .\step2_extract.ps1 -BookName "daniels-running-formula" -Mode immediate
 
 .EXAMPLE
     .\step2_extract.ps1 -BookName "daniels-running-formula" -Mode batch
+
+.EXAMPLE
+    .\step2_extract.ps1 -BookName "daniels-running-formula" -Mode batch -Force
 
 .EXAMPLE
     .\step2_extract.ps1 -BookName "daniels-running-formula" -Check "msgbatch_abc123"
@@ -56,7 +63,9 @@ param(
     [ValidateSet("immediate", "batch")]
     [string]$Mode = "immediate",
 
-    [string]$Check
+    [string]$Check,
+
+    [switch]$Force
 )
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -171,9 +180,16 @@ $inputMd = $mdFiles[0].FullName
 Write-Host "Action     : SUBMIT EXTRACTION"
 Write-Host "Mode       : $Mode"
 Write-Host "Input file : $($mdFiles[0].Name)"
+if ($Force) {
+    Write-Host "Force      : YES (will overwrite existing KB if present)" -ForegroundColor Yellow
+}
 Write-Host ""
 
-python "$ExtractPy" --prompt "$PromptMd" --input "$inputMd" --output "$kbDir" --mode $Mode
+if ($Force) {
+    python "$ExtractPy" --prompt "$PromptMd" --input "$inputMd" --output "$kbDir" --mode $Mode --force
+} else {
+    python "$ExtractPy" --prompt "$PromptMd" --input "$inputMd" --output "$kbDir" --mode $Mode
+}
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
