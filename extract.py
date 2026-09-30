@@ -2,7 +2,7 @@
 """
 extract.py — Paso 2 del pipeline: libro convertido (.md) → KB (CORE + BIBLIOTECA).
 
-Versión 3.1
+Versión 3.2
 
 CÓMO FUNCIONA
   1. MAP        (Claude)  lee el libro, saca metadatos, dominio, nivel de autoridad
@@ -32,6 +32,12 @@ DOS MODOS
   se interrumpe, al volver a correr solo se hace lo que falta.
   Antes de gastar muestra el costo estimado y pide confirmación (--yes la omite).
 
+MODO VENTANA (app)
+  Si la variable de entorno BPP_UI=1 está definida (la define la app), las
+  preguntas de costo y los avisos se envían como líneas "@@BPP {json}" y la
+  respuesta ("s" o "n") se lee de la entrada estándar. Sin BPP_UI, todo
+  funciona igual que en la consola.
+
 REQUISITOS
   pip install --upgrade anthropic google-genai
   Variables de entorno ANTHROPIC_API_KEY y GEMINI_API_KEY
@@ -59,7 +65,7 @@ try:
 except ImportError:
     sys.exit("Falta el SDK de Anthropic. Instala con:  pip install --upgrade anthropic")
 
-EXTRACTOR_VERSION = "3.1"
+EXTRACTOR_VERSION = "3.2"
 
 # ── Modelos y precios (USD por millón de tokens) ─────────────────────────────
 # Fuentes: platform.claude.com/docs y ai.google.dev/gemini-api/docs/pricing (sep 2026).
@@ -132,6 +138,40 @@ PRINT_LOCK = threading.Lock()
 def say(msg):
     with PRINT_LOCK:
         print(msg, flush=True)
+
+
+# ── Modo ventana (app) ──────────────────────────────────────────────────────
+# La app define BPP_UI=1. Entonces cada pregunta o aviso sale como una línea
+# "@@BPP {json}" y la respuesta llega por la entrada estándar.
+UI_MODE = os.environ.get("BPP_UI") == "1"
+UI_PREFIX = "@@BPP "
+
+if UI_MODE:
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", line_buffering=True)
+        except Exception:
+            pass
+
+
+def ui_event(evento, **datos):
+    """Aviso para la app (no hace nada en la consola)."""
+    if UI_MODE:
+        say(UI_PREFIX + json.dumps({"evento": evento, **datos}, ensure_ascii=False))
+
+
+def ask_yes(lineas, costo=None):
+    """¿Continuar? en la consola o en la ventana de la app. Devuelve True/False."""
+    if UI_MODE:
+        ui_event("confirmar", programa="extract", lineas=lineas, costo=costo)
+        resp = sys.stdin.readline()
+    else:
+        try:
+            resp = input("¿Continuar? [s/N]: ")
+        except EOFError:
+            print("Sin respuesta. Usa --yes para correr sin pregunta.")
+            return False
+    return resp.strip().lower() in ("s", "si", "sí", "y", "yes")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -466,18 +506,20 @@ class GeminiVerifier:
 # Etapas
 # ═════════════════════════════════════════════════════════════════════════════
 
-def confirm(msg_lines, assume_yes):
+def confirm(msg_lines, assume_yes, costo=None):
     print("\n" + "-" * 64)
     for ln in msg_lines:
         print("  " + ln)
     print("-" * 64)
     if assume_yes:
         return True
-    try:
-        return input("¿Continuar? [s/N]: ").strip().lower() in ("s", "si", "sí", "y", "yes")
-    except EOFError:
-        print("Sin respuesta. Usa --yes para correr sin pregunta.")
-        return False
+    if costo is None:  # se toma de la línea "Total estimado: ~$X"
+        for ln in reversed(msg_lines):
+            m = re.search(r"Total estimado: ~\$([\d,]+\.\d+)", ln)
+            if m:
+                costo = float(m.group(1).replace(",", ""))
+                break
+    return ask_yes(msg_lines, costo)
 
 
 def print_map(bmap, units):
@@ -916,7 +958,7 @@ def run_once(args):
             else:
                 est = (book_tokens * pin * CACHE_WRITE_MULT + 9000 * pout) / 1e6
             if not confirm([f"Pasada 1 — MAP ({model}, {mode.lower()})",
-                            f"Costo estimado: ~{money(est)} USD"], args.yes):
+                            f"Costo estimado: ~{money(est)} USD"], args.yes, costo=round(est, 2)):
                 sys.exit("Cancelado.")
         if not map_raw.exists():
             if args.batch:
@@ -1095,6 +1137,9 @@ def run_once(args):
     if partial:
         print("\n  KB PARCIAL (prueba). Para el libro completo corre sin --units.")
     print("=" * 64)
+    ui_event("terminado", programa="extract", core=str(core), biblioteca=str(lib), reporte=str(report),
+             entradas=stats["entries"], avisos=len(warnings), costo=round(total, 2),
+             problemas=[str(e) for e in errors], parcial=bool(partial))
     return "done"
 
 
@@ -1106,6 +1151,7 @@ def main():
     if not args.batch or args.no_wait:
         if run_once(args) == "pending":
             print("\n  Vuelve a correr el MISMO comando más tarde para continuar.")
+            ui_event("pendiente", programa="extract")
         return
     # Modo lote con espera automática: se queda revisando hasta que todo termine.
     # Si cierras la ventana, al volver a correr el mismo comando retoma donde iba.
@@ -1117,6 +1163,7 @@ def main():
             return
         say(f"\n  [{datetime.now().strftime('%H:%M')}] Esperando a Anthropic... próxima revisión en "
             f"{POLL_SECONDS // 60} min.")
+        ui_event("esperando", programa="extract", minutos=POLL_SECONDS // 60)
         time.sleep(POLL_SECONDS)
 
 

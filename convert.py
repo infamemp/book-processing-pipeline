@@ -2,7 +2,7 @@
 """
 convert.py — Paso 1 del pipeline: libro (EPUB / PDF / otros) → Markdown limpio.
 
-Versión 2.1
+Versión 2.2
 
 QUÉ HACE
   EPUB : lee el libro capítulo por capítulo en el orden real de lectura (spine).
@@ -26,6 +26,12 @@ GARANTÍAS
   - Antes de gastar, muestra el costo estimado y pide confirmación
     (usa --yes para omitir la pregunta).
   - Al terminar genera <salida>.conversion_report.txt con el detalle.
+
+MODO VENTANA (app)
+  Si la variable de entorno BPP_UI=1 está definida (la define la app), la
+  pregunta de costo y el resumen final se envían como líneas "@@BPP {json}" y
+  la respuesta ("s" o "n") se lee de la entrada estándar. Sin BPP_UI, todo
+  funciona igual que en la consola.
 
 REQUISITOS
   pip install --upgrade markitdown google-genai pymupdf markdownify beautifulsoup4 Pillow
@@ -55,7 +61,7 @@ from pathlib import Path
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
-CONVERTER_VERSION = "2.1"
+CONVERTER_VERSION = "2.2"
 
 # ── Modelo y precios ─────────────────────────────────────────────────────────
 
@@ -166,6 +172,40 @@ Rules:
 # ═════════════════════════════════════════════════════════════════════════════
 # Estructuras de trabajo
 # ═════════════════════════════════════════════════════════════════════════════
+
+# ── Modo ventana (app) ──────────────────────────────────────────────────────
+# La app define BPP_UI=1. Entonces cada pregunta o aviso sale como una línea
+# "@@BPP {json}" y la respuesta llega por la entrada estándar.
+UI_MODE = os.environ.get("BPP_UI") == "1"
+UI_PREFIX = "@@BPP "
+
+if UI_MODE:
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", line_buffering=True)
+        except Exception:
+            pass
+
+
+def ui_event(evento, **datos):
+    """Aviso para la app (no hace nada en la consola)."""
+    if UI_MODE:
+        print(UI_PREFIX + json.dumps({"evento": evento, **datos}, ensure_ascii=False), flush=True)
+
+
+def ask_yes(lineas, costo=None):
+    """¿Continuar? en la consola o en la ventana de la app. Devuelve True/False."""
+    if UI_MODE:
+        ui_event("confirmar", programa="convert", lineas=lineas, costo=costo)
+        resp = sys.stdin.readline()
+    else:
+        try:
+            resp = input("¿Continuar? [s/N]: ")
+        except EOFError:
+            print("Sin respuesta. Usa --yes para correr sin pregunta.")
+            return False
+    return resp.strip().lower() in ("s", "si", "sí", "y", "yes")
+
 
 class Job:
     """Una imagen o página que Gemini debe transcribir."""
@@ -530,20 +570,17 @@ def confirm_cost(ocr, jobs, model, assume_yes):
     est = len(pending) * (EST_TOKENS_IN_PER_JOB * pin + EST_TOKENS_OUT_PER_JOB * pout) / 1_000_000
     pages = sum(1 for j in pending if j.kind == "page")
     images = len(pending) - pages
-    print("\n" + "-" * 60)
-    print(f"  Por transcribir con Gemini : {images} imagen(es) + {pages} página(s) completa(s)")
+    lines = [f"Conversión — por transcribir con Gemini: {images} imagen(es) + {pages} página(s) completa(s)"]
     if cached:
-        print(f"  Ya en caché (sin costo)    : {cached}")
-    print(f"  Costo estimado             : ~${est:.2f} USD  ({model})")
+        lines.append(f"Ya en caché (sin costo): {cached}")
+    lines.append(f"Costo estimado: ~${est:.2f} USD  ({model})")
+    print("\n" + "-" * 60)
+    for ln in lines:
+        print("  " + ln)
     print("-" * 60)
     if assume_yes:
         return True
-    try:
-        ans = input("¿Continuar? [s/N]: ").strip().lower()
-    except EOFError:
-        print("Sin respuesta. Usa --yes para correr sin pregunta.")
-        return False
-    return ans in ("s", "si", "sí", "y", "yes")
+    return ask_yes(lines, round(est, 2))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1019,6 +1056,9 @@ def convert(input_path, output_path, model, workers, assume_yes):
     else:
         print("  Todo el contenido quedó transcrito.")
     print("=" * 60)
+    ui_event("terminado", programa="convert", archivo=str(out), reporte=str(report_path),
+             costo=round(report.cost(), 3) if report.counts.get("jobs_total") else 0.0,
+             sin_transcribir=len(report.problems))
 
 
 def main():
