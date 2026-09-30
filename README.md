@@ -10,6 +10,21 @@ Libro (.epub/.pdf)  →  convert.py  →  libro.md  →  extract.py  →  _core.
 
 Este repo guarda **solo código**. Los libros y los KB (material con derechos de autor) no se suben a Git.
 
+## La app (ventana)
+
+La forma fácil: arrastras el libro, apruebas el costo con un botón y eliges la carpeta de salida.
+
+```powershell
+pythonw app\ventana.py
+```
+
+- **Carpeta de salida:** botón *Cambiar…* (se recuerda). Por defecto, `Google Drive\00_Anthropic\Library`.
+- **Modo:** *Lote* (más barato, tarda de minutos a horas) o *Inmediato*.
+- Varios libros se procesan en fila, uno a la vez. Si cierras la app, *Reanudar* sigue donde iba sin volver a pagar.
+- Piezas en `app/`: `ventana.py` (ventana), `servidor.py` (servidor local), `trabajos.py` (fila de libros), `config.py` (llaves y carpetas) y `web/index.html` (la página). Preparadas para correr también en un VPS (`BPP_MODO=servidor`).
+
+`procesar_libro.ps1` sigue funcionando igual, y ambos usan la misma carpeta de resultados.
+
 ## Qué produce cada libro
 
 | Archivo | Contenido |

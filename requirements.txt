@@ -5,3 +5,4 @@ pymupdf
 markdownify
 beautifulsoup4
 Pillow
+pywebview
