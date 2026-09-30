@@ -61,7 +61,7 @@ Todo queda guardado en `_work_<libro>`. Si algo falla, al repetir el comando sol
 pip install -r requirements.txt
 ```
 
-Variables de entorno de Windows (permanentes, nunca en el código): `ANTHROPIC_API_KEY` y `GEMINI_API_KEY`.
+Variables de entorno de Windows (permanentes, nunca en el código): `BPP_ANTHROPIC_API_KEY` (llave de Claude exclusiva de esta app; si no existe se usa `ANTHROPIC_API_KEY`) y `GEMINI_API_KEY`.
 Necesitas saldo en la cuenta de Anthropic.
 
 ## Dónde quedan los archivos

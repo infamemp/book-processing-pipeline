@@ -4,9 +4,16 @@ config.py — Configuración de la app (llaves, carpetas, modo local o servidor)
 Todo lo que cambia entre tu laptop y un futuro VPS sale de aquí, nunca del
 código de las otras piezas.
 
-Variables de entorno (todas opcionales salvo las llaves):
-  ANTHROPIC_API_KEY   llave de Claude (extracción)
-  GEMINI_API_KEY      llave de Gemini (imágenes y verificación)
+Llaves (variables de entorno de Windows):
+  BPP_ANTHROPIC_API_KEY  llave de Claude EXCLUSIVA de esta app (recomendada:
+                         así su gasto se ve aparte en la consola de Anthropic)
+  ANTHROPIC_API_KEY      llave general; se usa solo si no existe la exclusiva
+  BPP_GEMINI_API_KEY     igual para Gemini (opcional)
+  GEMINI_API_KEY         llave general de Gemini
+  En Windows se leen también directo de la configuración guardada, así que
+  funcionan aunque la ventana de PowerShell se haya abierto antes de crearlas.
+
+Otras variables (opcionales):
   BPP_MODO            "local" (predeterminado) o "servidor" (VPS)
   BPP_DATA_DIR        carpeta interna de la app (trabajos, bitácoras, ajustes)
   BPP_HOST, BPP_PORT  dirección del servidor (local: 127.0.0.1 y puerto libre)
@@ -58,11 +65,58 @@ def carpeta_web():
     return Path(__file__).resolve().parent / "web"
 
 
+def _leer_variable(nombre):
+    """Busca la variable en el proceso y, en Windows, en la configuración guardada."""
+    valor = (os.environ.get(nombre) or "").strip()
+    if valor or os.name != "nt":
+        return valor
+    try:
+        import winreg
+    except ImportError:
+        return ""
+    lugares = ((winreg.HKEY_CURRENT_USER, "Environment"),
+               (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"))
+    for raiz, ruta in lugares:
+        try:
+            with winreg.OpenKey(raiz, ruta) as k:
+                valor, _ = winreg.QueryValueEx(k, nombre)
+                if valor:
+                    return str(valor).strip()
+        except OSError:
+            pass
+    return ""
+
+
+# (llave exclusiva de la app, llave general)
+NOMBRES_LLAVES = {
+    "anthropic": ("BPP_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
+    "gemini": ("BPP_GEMINI_API_KEY", "GEMINI_API_KEY"),
+}
+_FUENTE = {}
+
+
+def cargar_llaves():
+    """La llave exclusiva tiene prioridad. Se entrega al motor con el nombre
+    general (ANTHROPIC_API_KEY / GEMINI_API_KEY), solo dentro de la app."""
+    for clave, (propia, general) in NOMBRES_LLAVES.items():
+        _FUENTE[clave] = None
+        for nombre in (propia, general):
+            valor = _leer_variable(nombre)
+            if valor:
+                os.environ[general] = valor
+                _FUENTE[clave] = "app" if nombre == propia else "general"
+                break
+
+
+cargar_llaves()
+
+
 def llaves():
-    return {
-        "anthropic": bool(os.environ.get("ANTHROPIC_API_KEY")),
-        "gemini": bool(os.environ.get("GEMINI_API_KEY")),
-    }
+    return {k: bool(v) for k, v in _FUENTE.items()}
+
+
+def fuentes_llaves():
+    return dict(_FUENTE)
 
 
 def buscar_drive():

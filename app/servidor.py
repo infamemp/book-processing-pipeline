@@ -109,7 +109,7 @@ class Manejador(BaseHTTPRequestHandler):
         if ruta == "/api/estado":
             return self._json({
                 "ok": True, "app": config.APP_NOMBRE, "version": config.APP_VERSION,
-                "local": config.ES_LOCAL, "llaves": config.llaves(),
+                "local": config.ES_LOCAL, "llaves": config.llaves(), "fuentes": config.fuentes_llaves(),
                 "ajustes": config.leer_ajustes(),
                 "extensiones": sorted(config.EXTENSIONES), "max_mb": config.MAX_MB_LIBRO,
             })

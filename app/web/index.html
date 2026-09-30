@@ -159,11 +159,10 @@ async function api(ruta, datos) {
 
 async function cargarEstado() {
   estado = await api("/api/estado");
-  const ll = estado.llaves;
-  $("#llaves").innerHTML =
-    `<span class="chip ${ll.anthropic ? "" : "no"}">Claude ${ll.anthropic ? "✓" : "✗"}</span>` +
-    `<span class="chip ${ll.gemini ? "" : "no"}">Gemini ${ll.gemini ? "✓" : "✗"}</span>`;
-  const falt = [!ll.anthropic && "ANTHROPIC_API_KEY", !ll.gemini && "GEMINI_API_KEY"].filter(Boolean);
+  const ll = estado.llaves, fu = estado.fuentes || {};
+  const chip = (nom, k) => `<span class="chip ${ll[k] ? "" : "no"}" title="${fu[k] === "app" ? "Llave exclusiva de esta app" : fu[k] ? "Llave general" : "Sin llave"}">${nom} ${ll[k] ? "✓" : "✗"}${fu[k] === "app" ? " · exclusiva" : ""}</span>`;
+  $("#llaves").innerHTML = chip("Claude", "anthropic") + chip("Gemini", "gemini");
+  const falt = [!ll.anthropic && "BPP_ANTHROPIC_API_KEY", !ll.gemini && "GEMINI_API_KEY"].filter(Boolean);
   $("#faltan").style.display = falt.length ? "block" : "none";
   $("#faltan").textContent = falt.length ? `Falta la variable de entorno ${falt.join(" y ")}. Configúrala en Windows y vuelve a abrir la app.` : "";
   pintarAjustes();
