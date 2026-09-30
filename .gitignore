@@ -194,3 +194,7 @@ cython_debug/
 # Never commit results/personal data
 *.xlsx
 *.xls
+# Trabajo del pipeline (nunca se sube)
+_work_*/
+*.ocr_cache.json
+*.conversion_report.txt
