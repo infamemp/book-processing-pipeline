@@ -36,7 +36,7 @@ Todo queda guardado en `_work_<libro>`. Si algo falla, al repetir el comando sol
 ## Modos y costo
 
 - **Inmediato** (por defecto): resultado en minutos.
-- **Lote** (`-Lote`): ~50% más barato; tarda de minutos a horas (máximo 24 h). Se repite el mismo comando hasta que termine.
+- **Lote** (`-Lote`): ~50% más barato; tarda de minutos a horas (máximo 24 h). El programa espera solo hasta que termine; si se cierra la ventana, se repite el mismo comando y retoma.
 - Antes de gastar, muestra el costo estimado y pide confirmación.
 - Un libro de tamaño medio cuesta alrededor de $1.60 en lote y $3–4 en inmediato.
 

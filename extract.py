@@ -117,7 +117,10 @@ LIBRARY_SECTIONS = [
 ]
 VALID_DEST = {c for c, _ in CORE_SECTIONS} | {c for c, _ in LIBRARY_SECTIONS} | {"SUMMARY", "LOG", "DELETE"}
 
-ENTRY_RE = re.compile(r'<<<ENTRY\s+((?:\w+\s*=\s*"[^"]*"\s*)+)>>>(.*?)<<<END>>>', re.S)
+# Tolerante: el modelo a veces escribe ">" o ">>" en vez de ">>>", olvida "dest=" o deja comillas sueltas.
+# La cabecera se lee hasta el fin de línea y se interpreta por partes (ver parse_entries).
+ENTRY_RE = re.compile(r'<<<ENTRY[ \t]+([^\n]*?)[ \t]*>{1,3}[ \t]*\n(.*?)<<<END>{1,3}', re.S)
+BARE_DEST_RE = re.compile(r'^\s*([A-Za-z][A-Za-z0-9_]*)\b"?')
 ATTR_RE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
 
 UNIT_ONLY_NOTE = ("NOTE: in this call only the text of the unit is provided (inside <unit>), "
@@ -151,16 +154,22 @@ def fill(template, **fields):
     return template
 
 
-def parse_entries(text):
+def parse_entries(text, keep_junk=False):
     out = []
     for m in ENTRY_RE.finditer(text):
-        attrs = dict(ATTR_RE.findall(m.group(1)))
-        out.append({
-            "dest": attrs.get("dest", "").strip().upper(),
-            "title": attrs.get("title", "").strip(),
-            "replace": attrs.get("replace", "").strip().upper(),
-            "body": m.group(2).strip(),
-        })
+        head = m.group(1)
+        attrs = dict(ATTR_RE.findall(head))
+        if "dest" not in attrs:                       # p. ej.  SUMMARY title="U04"   o   C07" title="..."
+            bm = BARE_DEST_RE.match(head)
+            if bm:
+                attrs["dest"] = bm.group(1)
+        dest = attrs.get("dest", "").strip().upper()
+        title = attrs.get("title", "").strip()
+        body = m.group(2).strip()
+        junk = (not body) or "PLACEHOLDER" in dest or title.lower() == "placeholder"
+        if junk and not keep_junk:
+            continue
+        out.append({"dest": dest, "title": title, "replace": attrs.get("replace", "").strip().upper(), "body": body})
     return out
 
 
@@ -838,7 +847,7 @@ def assemble(workdir, outdir, book, bmap, units, content_units, model, partial, 
 # Principal
 # ═════════════════════════════════════════════════════════════════════════════
 
-def main():
+def parse_args():
     here = Path(__file__).resolve().parent
     ap = argparse.ArgumentParser(
         description="Extrae un KB (CORE + BIBLIOTECA) de un libro convertido (Claude + verificación Gemini).",
@@ -854,8 +863,15 @@ def main():
     ap.add_argument("--units", default="", help="Solo estas unidades, ej. U05,U08 (prueba parcial)")
     ap.add_argument("--no-verify", action="store_true", help="Omitir la verificación con Gemini")
     ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Llamadas en paralelo (predeterminado: 3)")
+    ap.add_argument("--no-wait", action="store_true",
+                    help="En modo lote, no esperar: termina al enviar cada lote (hay que repetir el comando)")
     ap.add_argument("--yes", action="store_true", help="No preguntar antes de gastar")
     args = ap.parse_args()
+    return args
+
+
+def run_once(args):
+    here = Path(__file__).resolve().parent
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         sys.exit("Falta ANTHROPIC_API_KEY. Configúrala con:  $env:ANTHROPIC_API_KEY = 'sk-ant-...'")
@@ -906,8 +922,7 @@ def main():
             if args.batch:
                 st = claude.run_batch("map", [job])
                 if st != "done" or not map_raw.exists():
-                    print("\n  Vuelve a correr el MISMO comando más tarde para continuar.")
-                    return
+                    return "pending"
             else:
                 say("\nMAP: leyendo el libro completo...")
                 errs = claude.run_immediate([job], 1)
@@ -925,7 +940,9 @@ def main():
         print(f"  AVISO: {p}")
     if not units:
         sys.exit("ERROR: no se pudo ubicar ninguna unidad del MAP en el libro. Revisa map_raw.txt")
-    print_map(bmap, units)
+    if not getattr(args, "_printed", False):
+        print_map(bmap, units)
+        args._printed = True
     if args.stage == "map":
         print("MAP listo. Para probar algunos capítulos usa --units con los IDs de arriba.")
         return
@@ -996,8 +1013,7 @@ def main():
     if args.batch and claude.batch_state_file("extract").exists():
         st = claude.run_batch("extract", [])
         if st != "done":
-            print("\n  Vuelve a correr el MISMO comando más tarde para continuar.")
-            return
+            return "pending"
         jobs = extract_jobs()
     if jobs:
         ver_list = [] if args.no_verify else [j["unit"] for j in jobs]
@@ -1006,9 +1022,7 @@ def main():
             sys.exit("Cancelado. Lo ya hecho quedó guardado en la carpeta de trabajo.")
         if args.batch:
             claude.run_batch("extract", jobs)
-            print("\n  Lote enviado. Anthropic suele entregar en minutos u horas (máx. 24 h).")
-            print("  Vuelve a correr el MISMO comando más tarde para descargar y continuar.")
-            return
+            return "pending"
         say(f"\nEXTRACT: {len(jobs)} unidad(es), {args.workers} en paralelo...")
         errors += claude.run_immediate(jobs, max(1, args.workers))
     if args.stage == "extract":
@@ -1020,6 +1034,21 @@ def main():
         for e in errors:
             print(f"  - {e}")
         return
+
+    # Aviso: etiquetas que no se pudieron leer (nunca debe pasar en silencio)
+    for u in extracted:
+        raw_txt = (workdir / f"{u['id']}.extract.txt").read_text(encoding="utf-8")
+        n_raw, n_ok = raw_txt.count("<<<ENTRY"), len(parse_entries(raw_txt, keep_junk=True))
+        if n_ok < n_raw:
+            say(f"  ⚠ {u['id']}: {n_raw - n_ok} entrada(s) con etiqueta mal formada no se pudieron leer.")
+    # Aviso: capítulos con muy pocas entradas (Claude se quedó corto; VERIFY lo reconstruye)
+    for u in extracted:
+        n_ent = len(parse_entries((workdir / f"{u['id']}.extract.txt").read_text(encoding="utf-8")))
+        esperado = max(2, u["chars"] // 4 // 3000)
+        if n_ent < esperado and not (workdir / f"{u['id']}.lowyield").exists():
+            (workdir / f"{u['id']}.lowyield").write_text(str(n_ent), encoding="utf-8")
+            say(f"  ⚠ {u['id']} ({u.get('title', '')[:40]}): EXTRACT produjo solo {n_ent} entrada(s) "
+                f"(esperadas ≥{esperado}). VERIFY la completará; revísala en el reporte.")
 
     # ── 3) VERIFY (Gemini) ─────────────────────────────────────────────────
     if not args.no_verify:
@@ -1039,8 +1068,7 @@ def main():
             if args.batch:
                 st = claude.run_batch("synthesis", [job] if not claude.batch_state_file("synthesis").exists() else [])
                 if st != "done" or not synth_out.exists():
-                    print("\n  Vuelve a correr el MISMO comando más tarde para terminar.")
-                    return
+                    return "pending"
             else:
                 if usage.cache_alive(model) or confirm(estimate([], [], True), args.yes):
                     say("\nSYNTHESIS: panorama, principios, Modelo Integral y notas de vigencia...")
@@ -1067,6 +1095,29 @@ def main():
     if partial:
         print("\n  KB PARCIAL (prueba). Para el libro completo corre sin --units.")
     print("=" * 64)
+    return "done"
+
+
+POLL_SECONDS = 180
+
+
+def main():
+    args = parse_args()
+    if not args.batch or args.no_wait:
+        if run_once(args) == "pending":
+            print("\n  Vuelve a correr el MISMO comando más tarde para continuar.")
+        return
+    # Modo lote con espera automática: se queda revisando hasta que todo termine.
+    # Si cierras la ventana, al volver a correr el mismo comando retoma donde iba.
+    print("\n  Modo lote: el programa esperará solo a que Anthropic termine cada pasada.")
+    print("  Puedes dejar esta ventana abierta. (Ctrl+C para salir; al volver a correr retoma.)")
+    while True:
+        status = run_once(args)
+        if status != "pending":
+            return
+        say(f"\n  [{datetime.now().strftime('%H:%M')}] Esperando a Anthropic... próxima revisión en "
+            f"{POLL_SECONDS // 60} min.")
+        time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":
