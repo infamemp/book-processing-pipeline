@@ -896,6 +896,7 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("--input", required=True, help="Libro convertido (.md) por convert.py")
     ap.add_argument("--output", required=True, help="Carpeta donde se guardan los archivos del KB")
+    ap.add_argument("--work", default="", help="Carpeta de trabajo (por defecto: <output>/_work_<libro>)")
     ap.add_argument("--prompts", default=str(here / "extraction_prompts.md"),
                     help="Archivo de instrucciones (por defecto: extraction_prompts.md junto a este script)")
     ap.add_argument("--model", default=DEFAULT_MODEL, help="sonnet (predeterminado), opus o fable")
@@ -929,7 +930,7 @@ def run_once(args):
     prompts = load_prompts(args.prompts)
     book = inp.read_text(encoding="utf-8")
     outdir = Path(args.output)
-    workdir = outdir / f"_work_{safe_slug(inp.stem)}"
+    workdir = Path(args.work) if args.work else outdir / f"_work_{safe_slug(inp.stem)}"
     workdir.mkdir(parents=True, exist_ok=True)
 
     usage = Usage(workdir)

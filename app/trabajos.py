@@ -271,7 +271,16 @@ class Fila:
     def _correr(self, t):
         salida = Path(t["salida"])
         salida.mkdir(parents=True, exist_ok=True)
-        md = salida / "libro.md"
+        # Lo interno (libro convertido, caché, trabajo) va en _interno; en la carpeta del
+        # libro quedan solo los 4 archivos finales. Libros hechos antes (con libro.md
+        # suelto en la carpeta) se siguen reanudando donde están.
+        interno = salida / "_interno"
+        antiguo = salida / "libro.md"
+        if antiguo.exists() and not (interno / "libro.md").exists():
+            md, extra = antiguo, []
+        else:
+            interno.mkdir(parents=True, exist_ok=True)
+            md, extra = interno / "libro.md", ["--work", str(interno / "trabajo")]
         self._log(t, f"=== {ahora()}  Inicio: {t['nombre']}  (modo {t['modo']}) ===")
         self._log(t, f"Carpeta de salida: {salida}")
 
@@ -291,7 +300,7 @@ class Fila:
         # 2) Extracción
         self._set(t, estado="extrayendo", etapa="extraccion", mensaje="Extrayendo el KB...")
         args = ["--input", str(md), "--output", str(salida),
-                "--prompts", str(config.carpeta_recursos() / "extraction_prompts.md")]
+                "--prompts", str(config.carpeta_recursos() / "extraction_prompts.md"), *extra]
         if t["modo"] == "lote":
             args.append("--batch")
         code = self._proceso(t, "extract", args)

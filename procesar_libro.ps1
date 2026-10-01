@@ -73,7 +73,16 @@ Write-Host "Libro  : $Libro"
 Write-Host "Salida : $Salida" -ForegroundColor Cyan
 
 # Paso 1: convertir (si ya existe libro.md, se reutiliza)
+# Lo interno va en _interno; en la carpeta del libro quedan solo los 4 archivos finales.
+# Libros hechos antes (con libro.md suelto) se siguen reanudando donde estan.
+$interno = Join-Path $Salida "_interno"
 $md = Join-Path $Salida "libro.md"
+$extra = @()
+if (-not (Test-Path $md)) {
+    New-Item -ItemType Directory -Path $interno -Force | Out-Null
+    $md = Join-Path $interno "libro.md"
+    $extra = @("--work", (Join-Path $interno "trabajo"))
+}
 if (Test-Path $md) {
     Write-Host "[1/2] Conversion ya hecha, se reutiliza: libro.md" -ForegroundColor Yellow
 } else {
@@ -84,7 +93,7 @@ if (Test-Path $md) {
 
 # Paso 2: extraer el KB
 Write-Host "[2/2] Extrayendo el KB..." -ForegroundColor Cyan
-$args2 = @((Join-Path $aqui "extract.py"), "--input", $md, "--output", $Salida)
+$args2 = @((Join-Path $aqui "extract.py"), "--input", $md, "--output", $Salida) + $extra
 if ($Lote) { $args2 += "--batch" }
 if ($Unidades) { $args2 += @("--units", $Unidades) }
 python @args2
