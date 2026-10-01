@@ -381,7 +381,7 @@ class GeminiOCR:
         if not api_key:
             print("AVISO: no existe GEMINI_API_KEY — las imágenes y páginas escaneadas")
             print("       quedarán marcadas como no procesadas.")
-            print("       Configúrala con:  $env:GEMINI_API_KEY = 'AIza...'")
+            print("       Ver README: Instalación (variable permanente de Windows).")
             return
         try:
             from google import genai

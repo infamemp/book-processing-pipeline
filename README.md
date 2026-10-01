@@ -14,9 +14,8 @@ Este repo guarda **solo código**. Los libros y los KB (material con derechos de
 
 La forma fácil: arrastras el libro, apruebas el costo con un botón y eliges la carpeta de salida.
 
-```powershell
-pythonw app\ventana.py
-```
+- **Programa (.exe):** doble clic en `build.bat` (una vez por computadora y cada vez que actualices el repo). Crea `dist\BookPipeline.exe` y el acceso directo **Book Pipeline** en el Escritorio. No necesita Python para usarse. Acepta EPUB y PDF.
+- **Desde el código:** `pythonw app\ventana.py` (acepta también DOCX).
 
 - **Carpeta de salida:** botón *Cambiar…* (se recuerda). Por defecto, `Google Drive\00_Anthropic\Library`.
 - **Modo:** *Lote* (más barato, tarda de minutos a horas) o *Inmediato*.

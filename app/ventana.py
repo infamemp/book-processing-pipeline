@@ -8,8 +8,8 @@ Dentro del .exe: es el programa principal. Cuando el .exe se llama a sí mismo
 """
 
 import ctypes
+import importlib
 import os
-import runpy
 import sys
 import traceback
 from pathlib import Path
@@ -47,10 +47,9 @@ def correr_motor(programa, args):
     """Corre convert.py o extract.py como si fuera 'python programa.py args'."""
     _arreglar_salidas()
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
-    script = base / f"{programa}.py"
-    sys.argv = [str(script), *args]
     sys.path.insert(0, str(base))
-    runpy.run_path(str(script), run_name="__main__")
+    sys.argv = [str(base / f"{programa}.py"), *args]
+    importlib.import_module(programa).main()
 
 
 def main():

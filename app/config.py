@@ -32,8 +32,14 @@ APP_VERSION = "1.0"
 MODO = os.environ.get("BPP_MODO", "local").strip().lower()
 ES_LOCAL = MODO != "servidor"
 
-# Formatos de libro aceptados (convert.py sabe leerlos)
-EXTENSIONES = {".epub", ".pdf", ".docx"}
+# Formatos de libro aceptados (DOCX solo si MarkItDown está instalado; el .exe no lo lleva)
+EXTENSIONES = {".epub", ".pdf"}
+try:
+    import importlib.util as _iu
+    if _iu.find_spec("markitdown") is not None:
+        EXTENSIONES.add(".docx")
+except (ImportError, ValueError):
+    pass
 MAX_MB_LIBRO = 300
 
 

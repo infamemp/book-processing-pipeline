@@ -118,7 +118,8 @@ class Fila:
         nombre = Path(nombre_archivo).name
         ext = Path(nombre).suffix.lower()
         if ext not in config.EXTENSIONES:
-            raise ValueError(f"Formato no aceptado ({ext or 'sin extensión'}). Usa EPUB, PDF o DOCX.")
+            raise ValueError(f"Formato no aceptado ({ext or 'sin extensión'}). "
+                             f"Usa: {', '.join(e[1:].upper() for e in sorted(config.EXTENSIONES))}.")
         if largo <= 0:
             raise ValueError("El archivo llegó vacío.")
         if largo > config.MAX_MB_LIBRO * 1024 * 1024:

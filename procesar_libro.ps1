@@ -44,6 +44,16 @@ function Buscar-Drive {
 
 if (-not (Test-Path $Libro)) { Write-Host "No encuentro el libro: $Libro" -ForegroundColor Red; exit 1 }
 $Libro = (Resolve-Path $Libro).Path
+# Llaves exclusivas de esta app (BPP_...) tienen prioridad sobre las generales
+foreach ($par in @(@("BPP_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"), @("BPP_GEMINI_API_KEY", "GEMINI_API_KEY"))) {
+    $propia = [Environment]::GetEnvironmentVariable($par[0], "Process")
+    if (-not $propia) { $propia = [Environment]::GetEnvironmentVariable($par[0], "User") }
+    if ($propia) { [Environment]::SetEnvironmentVariable($par[1], $propia.Trim(), "Process") }
+    elseif (-not [Environment]::GetEnvironmentVariable($par[1], "Process")) {
+        $gral = [Environment]::GetEnvironmentVariable($par[1], "User")
+        if ($gral) { [Environment]::SetEnvironmentVariable($par[1], $gral, "Process") }
+    }
+}
 foreach ($v in @("ANTHROPIC_API_KEY", "GEMINI_API_KEY")) {
     if (-not [Environment]::GetEnvironmentVariable($v)) {
         Write-Host "Falta la variable de entorno $v (ver README)." -ForegroundColor Red; exit 1

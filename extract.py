@@ -916,7 +916,7 @@ def run_once(args):
     here = Path(__file__).resolve().parent
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit("Falta ANTHROPIC_API_KEY. Configúrala con:  $env:ANTHROPIC_API_KEY = 'sk-ant-...'")
+        sys.exit("Falta la llave de Claude (BPP_ANTHROPIC_API_KEY o ANTHROPIC_API_KEY). Ver README: Instalación.")
     if not args.no_verify and not os.environ.get("GEMINI_API_KEY"):
         sys.exit("Falta GEMINI_API_KEY (necesaria para la verificación). O usa --no-verify.")
     inp = Path(args.input)

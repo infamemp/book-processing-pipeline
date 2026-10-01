@@ -120,9 +120,9 @@
 
   <div id="zona">
     <strong>Arrastra aquí el libro</strong>
-    <span class="nota">o haz clic para elegirlo · EPUB, PDF o DOCX</span>
+    <span class="nota">o haz clic para elegirlo · <span id="formatos">EPUB o PDF</span></span>
     <div id="subida"><div></div></div>
-    <input type="file" id="archivo" accept=".epub,.pdf,.docx" hidden multiple>
+    <input type="file" id="archivo" accept=".epub,.pdf" hidden multiple>
   </div>
 
   <h2>Libros</h2>
@@ -165,6 +165,9 @@ async function cargarEstado() {
   const falt = [!ll.anthropic && "BPP_ANTHROPIC_API_KEY", !ll.gemini && "GEMINI_API_KEY"].filter(Boolean);
   $("#faltan").style.display = falt.length ? "block" : "none";
   $("#faltan").textContent = falt.length ? `Falta la variable de entorno ${falt.join(" y ")}. Configúrala en Windows y vuelve a abrir la app.` : "";
+  const fm = estado.extensiones.map(e => e.slice(1).toUpperCase());
+  $("#formatos").textContent = fm.length > 1 ? fm.slice(0, -1).join(", ") + " o " + fm.at(-1) : fm[0];
+  $("#archivo").accept = estado.extensiones.join(",");
   pintarAjustes();
 }
 
@@ -202,7 +205,7 @@ window.addEventListener("drop", e => e.preventDefault());
 async function subirVarios(archivos) {
   for (const f of archivos) {
     const ext = "." + f.name.split(".").pop().toLowerCase();
-    if (!estado.extensiones.includes(ext)) { avisar(`"${f.name}": solo se aceptan EPUB, PDF o DOCX.`); continue; }
+    if (!estado.extensiones.includes(ext)) { avisar(`"${f.name}": formato no aceptado (${$("#formatos").textContent}).`); continue; }
     if (f.size > estado.max_mb * 1048576) { avisar(`"${f.name}" pasa de ${estado.max_mb} MB.`); continue; }
     try { await subir(f); avisar(`"${f.name}" agregado a la fila.`); }
     catch (e) { avisar(e.message); }
