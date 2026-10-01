@@ -16,6 +16,7 @@ La forma fácil: arrastras el libro, apruebas el costo con un botón y eliges la
 
 - **Programa (.exe):** doble clic en `build.bat` (una vez por computadora y cada vez que actualices el repo). Crea `dist\BookPipeline.exe` y el acceso directo **Book Pipeline** en el Escritorio. No necesita Python para usarse. Acepta EPUB y PDF.
 - **Desde el código:** `pythonw app\ventana.py` (acepta también DOCX).
+- **En un servidor (VPS):** ya hay `Dockerfile` listo. Ver [`DESPLIEGUE_VPS.md`](./DESPLIEGUE_VPS.md).
 
 - **Carpeta de salida:** botón *Cambiar…* (se recuerda). Por defecto, `Google Drive\00_Anthropic\Library`.
 - **Modo:** *Lote* (más barato, tarda de minutos a horas) o *Inmediato*.

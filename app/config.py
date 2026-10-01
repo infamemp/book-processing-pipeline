@@ -17,6 +17,8 @@ Otras variables (opcionales):
   BPP_MODO            "local" (predeterminado) o "servidor" (VPS)
   BPP_DATA_DIR        carpeta interna de la app (trabajos, bitácoras, ajustes)
   BPP_HOST, BPP_PORT  dirección del servidor (local: 127.0.0.1 y puerto libre)
+  BPP_USUARIO, BPP_PASSWORD  acceso con usuario y contraseña. OBLIGATORIA en
+                      modo servidor (sin ella el servidor no arranca).
 """
 
 import json
@@ -31,6 +33,8 @@ APP_VERSION = "1.0"
 
 MODO = os.environ.get("BPP_MODO", "local").strip().lower()
 ES_LOCAL = MODO != "servidor"
+USUARIO = os.environ.get("BPP_USUARIO", "admin")
+PASSWORD = os.environ.get("BPP_PASSWORD", "")
 
 # Formatos de libro aceptados (DOCX solo si MarkItDown está instalado; el .exe no lo lleva)
 EXTENSIONES = {".epub", ".pdf"}

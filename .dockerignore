@@ -1,0 +1,13 @@
+.git
+.gitignore
+.gitattributes
+build
+dist
+__pycache__
+*.pyc
+*.spec
+build.bat
+icon.ico
+procesar_libro.ps1
+*.md
+!extraction_prompts.md

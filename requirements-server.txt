@@ -1,0 +1,7 @@
+markitdown
+google-genai
+anthropic
+pymupdf
+markdownify
+beautifulsoup4
+Pillow

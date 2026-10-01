@@ -10,6 +10,8 @@ Servidor (VPS):      BPP_MODO=servidor  BPP_HOST=0.0.0.0  BPP_PORT=8080
 Solo usa la biblioteca estándar de Python.
 """
 
+import base64
+import hmac
 import io
 import json
 import os
@@ -93,8 +95,27 @@ class Manejador(BaseHTTPRequestHandler):
         except ValueError:
             return {}
 
+    def _autorizado(self):
+        """Con BPP_PASSWORD definida, pide usuario y contraseña (acceso básico)."""
+        if not config.PASSWORD:
+            return True
+        try:
+            enc = self.headers.get("Authorization", "")
+            usuario, _, clave = base64.b64decode(enc.split(" ", 1)[1]).decode("utf-8").partition(":")
+            if hmac.compare_digest(usuario, config.USUARIO) and hmac.compare_digest(clave, config.PASSWORD):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Book Pipeline", charset="UTF-8"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
+
     # ── GET ─────────────────────────────────────────────────────────────────
     def do_GET(self):
+        if not self._autorizado():
+            return
         ruta = urlparse(self.path).path
         if ruta in ("/", "/index.html"):
             f = config.carpeta_web() / "index.html"
@@ -144,6 +165,8 @@ class Manejador(BaseHTTPRequestHandler):
 
     # ── POST ────────────────────────────────────────────────────────────────
     def do_POST(self):
+        if not self._autorizado():
+            return
         # Protección: solo la propia página puede mandar órdenes (otra página
         # web no puede agregar este encabezado sin permiso del navegador).
         if self.headers.get("X-BPP") != "1":
@@ -210,6 +233,9 @@ def puerto_libre():
 def iniciar(host=None, puerto=None):
     """Arranca el servidor en segundo plano. Devuelve (servidor, url)."""
     global FILA
+    if not config.ES_LOCAL and not config.PASSWORD:
+        sys.exit("Modo servidor: define BPP_PASSWORD (y opcionalmente BPP_USUARIO). "
+                 "Sin contraseña no se arranca.")
     if FILA is None:
         FILA = Fila()
     host = host or os.environ.get("BPP_HOST") or ("127.0.0.1" if config.ES_LOCAL else "0.0.0.0")
