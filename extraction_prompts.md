@@ -1,5 +1,8 @@
 <!--
-extraction_prompts.md — Instrucciones del paso 2 (extracción de KB), versión 3.0
+extraction_prompts.md — Instrucciones del paso 2 (extracción de KB), versión 3.1
+
+Cambios 3.1: vocabulario de temas clínicos v2.0 (37 temas + general, con
+definición de cada uno) y temas principales/secundarios en el MAP.
 
 Cómo lo usa extract.py:
   - Todo lo que está entre "PROMPT: system" y el siguiente marcador es el
@@ -210,19 +213,104 @@ senior-health
 - `metric:` rpe · grip-strength · gait-speed · 1rm · functional-test-score
 
 nutrition
-- `condition:` obesidad · diabetes · resistencia_insulina · sop · endometriosis ·
-  fertilidad · embarazo · salud_hormonal · menopausia · glp1 · general
-  (these codes are fixed; they match the clinical system's index — never
-  translate or rename them)
+- `condition:` one or more codes from the CLINICAL TOPIC VOCABULARY below
+  (e.g. `condition:diabetes,renal`). Use only the topics the entry is
+  actually about; `general` when it applies to any patient.
 - `focus:` energy-balance · macronutrients · micronutrients · supplements ·
   meal-timing · glycemic-control · food-safety · weight-management ·
   gut-health · hydration · behavior
 - `stage:` preconception · trimester-1 · trimester-2 · trimester-3 ·
-  postpartum · lactation · perimenopause · postmenopause
+  postpartum · lactation · perimenopause · postmenopause · infancy ·
+  childhood · adolescence · older-adult
 - `metric:` kcal · g-per-kg · percent-energy · g · mg · mcg · iu · mg-dl ·
   mmol-l · hba1c · bmi · waist · body-fat · weight-gain
 
 general — no extra vocabulary (use universal tags only).
+
+# CLINICAL TOPIC VOCABULARY (v2.0, closed list)
+
+Used by `condition:` tags and by `conditions` / `conditions_secondary` in MAP.
+These codes are fixed: they match the clinical nutrition system's index, so
+never translate, rename, abbreviate or invent codes. Pick each topic by its
+definition, not by a word that happens to appear in the book.
+
+Metabolic
+- `obesidad` — obesity, overweight, weight loss and weight maintenance.
+- `diabetes` — type 2 diabetes and diabetes in general (prediabetes goes to
+  `resistencia_insulina`; gestational diabetes = `embarazo` + `diabetes`).
+- `diabetes_t1` — type 1 diabetes: insulin therapy, carbohydrate counting,
+  hypoglycemia management.
+- `resistencia_insulina` — insulin resistance, hyperinsulinemia, prediabetes,
+  metabolic syndrome.
+- `dislipidemia` — high cholesterol, LDL/HDL, triglycerides.
+- `hepatico` — liver disease: fatty liver (NAFLD/MASLD), cirrhosis, hepatitis.
+- `hiperuricemia` — high uric acid and gout.
+
+Cardio-renal
+- `hipertension` — high blood pressure, sodium/potassium management.
+- `cardiovascular` — heart disease: coronary disease, heart failure,
+  post-infarction, stroke prevention.
+- `renal` — kidney disease (CKD, dialysis, transplant) and kidney stones.
+
+Digestive
+- `salud_intestinal` — gut health in general: microbiota, fiber,
+  constipation, diarrhea, reflux, bloating.
+- `sii` — irritable bowel syndrome, low-FODMAP diet.
+- `eii` — inflammatory bowel disease: Crohn's disease, ulcerative colitis.
+- `celiaquia` — celiac disease and non-celiac gluten sensitivity.
+
+Hormonal & reproductive
+- `salud_hormonal` — hormonal health not covered by a more specific topic:
+  cortisol/stress, prolactin, menstrual cycle, hormonal balance.
+- `tiroides` — thyroid: hypothyroidism, hyperthyroidism, Hashimoto's.
+- `sop` — polycystic ovary syndrome (PCOS).
+- `endometriosis` — endometriosis and adenomyosis.
+- `fertilidad` — fertility in women and men, preconception, assisted
+  reproduction (IVF).
+- `menopausia` — perimenopause, menopause and postmenopause.
+
+Life stages
+- `embarazo` — pregnancy, including gestational diabetes.
+- `lactancia` — breastfeeding and postpartum nutrition.
+- `pediatria` — infants, children and adolescents.
+- `adulto_mayor` — older adults: sarcopenia, frailty, bone health in aging.
+
+Sport
+- `deportista` — sports nutrition: athletes, training and competition
+  fueling, hydration, body composition for performance.
+
+Treatments & special clinical topics
+- `glp1` — GLP-1 medications (semaglutide, tirzepatide, liraglutide) and
+  their nutritional management.
+- `bariatrica` — bariatric surgery: before and after (sleeve, bypass).
+- `oncologia` — cancer: nutrition during and after treatment.
+- `autoinmune` — autoimmune diseases (lupus, rheumatoid arthritis,
+  psoriasis, multiple sclerosis); Hashimoto's goes to `tiroides`.
+- `anemia` — anemia and iron, B12 or folate deficiency.
+- `alergias_intolerancias` — food allergies and intolerances (lactose,
+  fructose, histamine, etc.); celiac disease goes to `celiaquia`.
+- `tca` — eating disorders (anorexia, bulimia, binge eating, ARFID).
+
+Dietary patterns
+- `vegetariana_vegana` — vegetarian, vegan and plant-based diets.
+- `mediterranea` — Mediterranean diet.
+- `dash` — DASH diet.
+- `baja_carbohidratos_cetogenica` — low-carbohydrate and ketogenic diets.
+- `ayuno_intermitente` — intermittent fasting and time-restricted eating.
+
+Other
+- `general` — healthy eating for any person; no specific condition.
+
+Primary vs secondary topics (MAP):
+- `conditions` (primary): topics the book covers in depth, with actionable
+  content a nutritionist could apply (targets, rules, cautions, plans).
+  Usually 1-4. A book about one condition has one primary topic.
+- `conditions_secondary`: topics the book addresses with real but limited
+  content (a section, a chapter, a few concrete rules). Usually 0-5.
+- A passing mention is NOT a topic. When in doubt, choose secondary.
+- Never list the same code in both.
+- A sports-nutrition book declares the `nutrition` domain (possibly together
+  with `endurance-sport` or `strength-training`) and uses `deportista`.
 
 A needed term that is not in the vocabulary: use `subtopic:` and mention it in
 the unit's LOG entry. Do not invent new closed tags.
@@ -294,7 +382,8 @@ with this structure:
   "commercial_interests": "products, supplements, programs or services the author promotes in the book; empty if none",
   "domains": ["endurance-sport | strength-training | senior-health | nutrition | general"],
   "proposed_domain": null,
-  "conditions": ["only for nutrition: codes from the condition vocabulary"],
+  "conditions": ["only for nutrition: PRIMARY codes from the CLINICAL TOPIC VOCABULARY"],
+  "conditions_secondary": ["only for nutrition: SECONDARY codes from the CLINICAL TOPIC VOCABULARY"],
   "authority_level": "A | B | C",
   "authority_rationale": "",
   "abbreviation": "2-6 uppercase letters for this book, e.g. HPC",
