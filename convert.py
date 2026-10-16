@@ -2,7 +2,7 @@
 """
 convert.py — Paso 1 del pipeline: libro (EPUB / PDF / otros) → Markdown limpio.
 
-Versión 2.2
+Versión 2.3
 
 QUÉ HACE
   EPUB : lee el libro capítulo por capítulo en el orden real de lectura (spine).
@@ -13,6 +13,13 @@ QUÉ HACE
          de cada página se transcriben con Gemini y se insertan en esa misma
          página. Las páginas escaneadas (sin texto) se transcriben completas.
          Cada página queda marcada con <!-- PAGE N --> para poder citarla.
+         Desde 2.3 también se transcriben completas, como imagen, las páginas
+         cuyo texto nativo no es confiable:
+           - texto dañado (letras corridas por la codificación de la fuente),
+           - tablas o recuadros con leyenda ("Table 5.6", "Box 2.1", "Cuadro 3"),
+             que el texto nativo desordena,
+           - símbolos perdidos ("≥7%" leído como "$7%", "≤45%" como "#45%").
+         Si la transcripción falla, se usa el texto nativo y queda en el reporte.
   Otros: DOCX, PPTX, HTML, etc. se convierten con MarkItDown (sin imágenes).
 
 GARANTÍAS
@@ -61,7 +68,7 @@ from pathlib import Path
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
-CONVERTER_VERSION = "2.2"
+CONVERTER_VERSION = "2.3"
 
 # ── Modelo y precios ─────────────────────────────────────────────────────────
 
@@ -77,6 +84,7 @@ PRICES = {
 # Estimado por imagen/página, solo para el aviso previo (~1.5k in, ~1k out).
 EST_TOKENS_IN_PER_JOB = 1500
 EST_TOKENS_OUT_PER_JOB = 1000
+EST_TOKENS_OUT_PER_PAGE = 2000   # una página completa de texto produce más salida
 
 MAX_OUTPUT_TOKENS = 16384
 RETRIES = 3
@@ -91,6 +99,13 @@ PDF_MIN_IMAGE_PT = 72            # imágenes de menos de 1 pulgada = decorativas
 PDF_MIN_IMAGE_AREA_RATIO = 0.02  # imágenes de menos de 2% de la página = decorativas
 PDF_REPEATED_IMAGE_PAGES = 3     # imagen repetida en >3 páginas = logo/fondo
 PDF_RENDER_ZOOM = 2.0            # 144 dpi para transcribir
+
+# Texto nativo no confiable (PDF): la página se transcribe completa como imagen.
+GARBLED_MIN_WORDS = 8            # bloques más cortos no se evalúan
+GARBLED_STOP_RATIO = 0.06        # menos palabras comunes que esto = sospechoso
+GARBLED_SHIFT_RATIO = 0.15       # si al "descorrer" las letras aparecen palabras comunes = dañado
+GARBLED_NO_VOWEL_RATIO = 0.30    # demasiadas palabras sin vocales = dañado
+GARBLED_BAD_CHARS = 3            # caracteres de uso privado o de reemplazo en la página
 
 IMG_MIN_PX = 100                 # imágenes EPUB más chicas = decorativas
 IMG_MIN_BYTES = 3000
@@ -166,7 +181,32 @@ Rules:
 - Charts / figures on the page: describe them (type, title, axes with units,
   every labeled value) at the point where they appear. Never estimate values.
 - Sidebars / boxes: transcribe them after the main text, preceded by "> ".
+- Keep every symbol exactly as printed: ≥ ≤ < > ± × ÷ µ ° % ‰ and superscripts.
+  Never drop or replace a comparison sign; "≥7%" is not "7%".
 - If part of the page is unreadable, write [ILLEGIBLE] in that spot. Never guess."""
+
+# Leyenda de tabla o recuadro al inicio de una línea ("Table 5.6", "Box 2.1",
+# "Cuadro 3"). Solo al inicio de línea: una referencia dentro del texto
+# ("ver Tabla 2") no hace que la página se transcriba completa.
+VISION_CAPTION_RE = re.compile(
+    r"(?mi)^\s*(?:#+\s*)?(?:Table|Tabla|Cuadro|Box|Recuadro|Panel|Exhibit)\s*[A-Z]?\d+(?:[.\-]\d+)?\b")
+
+# Signo ≥ / ≤ perdido por la codificación de la fuente: "$7%", "#45%".
+SYMBOL_LOSS_RE = re.compile(r"(?<![\w$#])[#$]\s?\d+(?:[.,]\d+)?\s?%")
+
+# Palabras muy comunes (inglés y español) para detectar texto con letras corridas.
+STOP_WORDS = {
+    "the", "and", "of", "to", "in", "is", "for", "with", "on", "are", "be", "as",
+    "or", "by", "that", "this", "it", "at", "an", "from", "not", "can", "may",
+    "should", "was", "were", "has", "have", "if", "but", "more", "than", "your",
+    "you", "their", "which", "also", "per", "day", "de", "la", "el", "en", "los",
+    "las", "que", "del", "se", "por", "con", "para", "una", "un", "es", "al",
+    "lo", "como", "su", "sus", "le", "les", "no", "si", "mas", "más", "pero",
+}
+_WORD_RE = re.compile(r"[A-Za-zÀ-ÿ]{2,}")
+_VOWEL_RE = re.compile(r"[aeiouyáéíóúüAEIOUYÁÉÍÓÚÜ]")
+_CITATION_RE = re.compile(r"\bet al\b|\bdoi\b|;\s*\d+\s*(?:\(\d+\))?\s*:\s*\d+", re.IGNORECASE)
+_BAD_CHAR_RE = re.compile("[-�]")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -567,9 +607,11 @@ def confirm_cost(ocr, jobs, model, assume_yes):
     if ocr.client is None:
         return True
     pin, pout = PRICES.get(model, PRICES[DEFAULT_MODEL])
-    est = len(pending) * (EST_TOKENS_IN_PER_JOB * pin + EST_TOKENS_OUT_PER_JOB * pout) / 1_000_000
     pages = sum(1 for j in pending if j.kind == "page")
     images = len(pending) - pages
+    est = (len(pending) * EST_TOKENS_IN_PER_JOB * pin
+           + images * EST_TOKENS_OUT_PER_JOB * pout
+           + pages * EST_TOKENS_OUT_PER_PAGE * pout) / 1_000_000
     lines = [f"Conversión — por transcribir con Gemini: {images} imagen(es) + {pages} página(s) completa(s)"]
     if cached:
         lines.append(f"Ya en caché (sin costo): {cached}")
@@ -865,6 +907,64 @@ def pdf_page_markdown(page, body_size):
     return "\n\n".join(t for _, t in items)
 
 
+def _stop_ratio(words):
+    return sum(1 for w in words if w.lower() in STOP_WORDS) / len(words) if words else 0.0
+
+
+def _shift(word, k):
+    """Corre cada letra k posiciones (a→b con k=1), conservando mayúsculas."""
+    out = []
+    for c in word:
+        if "a" <= c <= "z":
+            out.append(chr((ord(c) - 97 + k) % 26 + 97))
+        elif "A" <= c <= "Z":
+            out.append(chr((ord(c) - 65 + k) % 26 + 65))
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def garbled_block(text):
+    """
+    True si un bloque de texto nativo está dañado: la fuente del PDF trae una
+    codificación rota y las letras salen corridas ("Lfz qpjout" en vez de
+    "Key points") o sin vocales. Las referencias bibliográficas y las listas
+    cortas no cuentan (tienen pocas palabras comunes de forma natural).
+    """
+    words = _WORD_RE.findall(text)
+    if len(words) < GARBLED_MIN_WORDS or _stop_ratio(words) >= GARBLED_STOP_RATIO:
+        return False
+    if _CITATION_RE.search(text) or len(re.findall(r"\b(?:19|20)\d{2}\b", text)) >= 2:
+        return False
+    for k in (-1, 1, -2, 2, -3, 3):
+        if _stop_ratio([_shift(w, k) for w in words]) >= GARBLED_SHIFT_RATIO:
+            return True
+    long_words = [w for w in words if len(w) >= 4]
+    if long_words:
+        no_vowel = sum(1 for w in long_words if not _VOWEL_RE.search(w)) / len(long_words)
+        if no_vowel >= GARBLED_NO_VOWEL_RATIO:
+            return True
+    return False
+
+
+def unreliable_text(page, native_text):
+    """
+    Motivo por el que el texto nativo de la página no es confiable y la página
+    debe transcribirse completa como imagen, o "" si el texto nativo sirve.
+    """
+    plain = page.get_text("text")
+    if len(_BAD_CHAR_RE.findall(plain)) >= GARBLED_BAD_CHARS:
+        return "texto dañado"
+    for b in page.get_text("blocks"):
+        if len(b) >= 7 and b[6] == 0 and garbled_block(b[4]):
+            return "texto dañado"
+    if SYMBOL_LOSS_RE.search(plain):
+        return "símbolos perdidos"
+    if VISION_CAPTION_RE.search(plain) or VISION_CAPTION_RE.search(native_text):
+        return "tabla o recuadro"
+    return ""
+
+
 def pdf_native_pages(doc):
     """Texto de cada página. Devuelve (lista_de_textos, cantidad_de_tablas_con_bordes)."""
     body = _body_font_size(doc)
@@ -891,6 +991,7 @@ def convert_pdf(path, ocr, report, assume_yes):
             xref_pages.setdefault(img[0], set()).add(p.number)
 
     jobs, pages_out, scanned = [], [], 0
+    vision = {"texto dañado": 0, "símbolos perdidos": 0, "tabla o recuadro": 0}
     zoom = pymupdf.Matrix(PDF_RENDER_ZOOM, PDF_RENDER_ZOOM)
 
     for page in doc:
@@ -910,6 +1011,18 @@ def convert_pdf(path, ocr, report, assume_yes):
             scanned += 1
             pix = page.get_pixmap(matrix=zoom)
             job = Job(pix.tobytes("jpeg"), "image/jpeg", f"p. {n}", "page", fallback_text=text)
+            jobs.append(job)
+            pages_out.append((n, job.token))
+            continue
+
+        # Texto nativo no confiable: la página completa se transcribe como
+        # imagen (incluye sus tablas, recuadros y figuras). Si falla, se usa
+        # el texto nativo y queda en el reporte.
+        motivo = unreliable_text(page, text)
+        if motivo:
+            vision[motivo] += 1
+            pix = page.get_pixmap(matrix=zoom)
+            job = Job(pix.tobytes("jpeg"), "image/jpeg", f"p. {n} ({motivo})", "page", fallback_text=text)
             jobs.append(job)
             pages_out.append((n, job.token))
             continue
@@ -944,6 +1057,10 @@ def convert_pdf(path, ocr, report, assume_yes):
     report.lines.append(f"Páginas                        : {total}")
     report.lines.append(f"Páginas escaneadas (completas) : {scanned}")
     report.lines.append(f"Páginas con tablas detectadas  : {table_pages}")
+    report.lines.append("Páginas leídas como imagen porque su texto no es confiable:")
+    report.lines.append(f"  por texto dañado             : {vision['texto dañado']}")
+    report.lines.append(f"  por símbolos perdidos        : {vision['símbolos perdidos']}")
+    report.lines.append(f"  por tabla o recuadro         : {vision['tabla o recuadro']}")
 
     meta = {}
     m = doc.metadata or {}

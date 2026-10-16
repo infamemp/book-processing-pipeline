@@ -40,7 +40,7 @@ Temas clínicos (solo libros de nutrición): 37 temas más `general`, con su def
 
 ## Cómo funciona
 
-1. **convert.py**: EPUB/PDF → Markdown. Las imágenes y tablas de imagen se transcriben con Gemini (se guarda caché y un reporte de lo descartado).
+1. **convert.py**: EPUB/PDF → Markdown. Las imágenes y tablas de imagen se transcriben con Gemini (se guarda caché y un reporte de lo descartado). En PDF, las páginas cuyo texto nativo no es confiable (texto con letras corridas, tablas o recuadros con leyenda, signos ≥/≤ perdidos) se transcriben completas como imagen.
 2. **extract.py** (Claude Sonnet 5.5 + Gemini 3.8 Flash):
    - MAP: metadatos, dominio, nivel de autoridad y división en capítulos.
    - EXTRACT: una llamada por capítulo.
