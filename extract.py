@@ -65,7 +65,7 @@ try:
 except ImportError:
     sys.exit("Falta el SDK de Anthropic. Instala con:  pip install --upgrade anthropic")
 
-EXTRACTOR_VERSION = "3.2"
+EXTRACTOR_VERSION = "3.3"
 
 # ── Modelos y precios (USD por millón de tokens) ─────────────────────────────
 # Fuentes: platform.claude.com/docs y ai.google.dev/gemini-api/docs/pricing (sep 2026).
@@ -186,6 +186,39 @@ def load_prompts(path):
         if k not in blocks:
             sys.exit(f"ERROR: al archivo de instrucciones le falta el bloque '{k}'.")
     return blocks
+
+
+def clinical_topics(system_prompt):
+    """Codes of the CLINICAL TOPIC VOCABULARY, read from the prompt itself so
+    the list lives in one place (extraction_prompts.md)."""
+    m = re.search(r"# CLINICAL TOPIC VOCABULARY(.*?)(?:\n# |\Z)", system_prompt, flags=re.S)
+    if not m:
+        return set()
+    return set(re.findall(r"^- `([a-z0-9_]+)` —", m.group(1), flags=re.M))
+
+
+def clean_topics(bmap, valid):
+    """Normalizes the MAP topics: lowercase, no duplicates, no code in both
+    lists (primary wins), and unknown codes removed with a warning."""
+    warnings = []
+    seen = set()
+    for key in ("conditions", "conditions_secondary"):
+        raw = bmap.get(key) or []
+        if isinstance(raw, str):
+            raw = [raw]
+        out = []
+        for c in raw:
+            code = str(c).strip().lower()
+            if not code or code in seen:
+                continue
+            if valid and code not in valid:
+                warnings.append(f"MAP: tema desconocido '{code}' en {key} (no está en la lista de temas; se omitió)")
+                continue
+            seen.add(code)
+            out.append(code)
+        bmap[key] = out
+    bmap["_topic_warnings"] = warnings
+    return warnings
 
 
 def fill(template, **fields):
@@ -527,7 +560,8 @@ def print_map(bmap, units):
     print("\n" + "=" * 64)
     print(f"  {md.get('title', '')} — {', '.join(md.get('authors', []))} ({md.get('year', '')})")
     print(f"  Dominio(s): {', '.join(bmap.get('domains', []))}"
-          + (f"   Temas: {', '.join(bmap.get('conditions', []))}" if bmap.get("conditions") else ""))
+          + (f"   Temas: {', '.join(bmap.get('conditions', []))}" if bmap.get("conditions") else "")
+          + (f"   Secundarios: {', '.join(bmap.get('conditions_secondary', []))}" if bmap.get("conditions_secondary") else ""))
     print(f"  Nivel sugerido: {bmap.get('authority_level', '?')} — {bmap.get('authority_rationale', '')[:120]}")
     if bmap.get("proposed_domain"):
         print(f"  [PROPUESTA DE DOMINIO NUEVO] {bmap['proposed_domain']}")
@@ -703,7 +737,7 @@ def assemble(workdir, outdir, book, bmap, units, content_units, model, partial, 
     abbr = re.sub(r"[^A-Z0-9]", "", (bmap.get("abbreviation") or "BK").upper())[:6] or "BK"
 
     by_dest = {c: [] for c, _ in CORE_SECTIONS + LIBRARY_SECTIONS}
-    logs, warnings, stats = [], [], {"entries": 0, "corrected": 0, "added": 0, "deleted": 0, "bad_dest": 0}
+    logs, warnings, stats = [], list(bmap.get("_topic_warnings", [])), {"entries": 0, "corrected": 0, "added": 0, "deleted": 0, "bad_dest": 0}
 
     for u in content_units:
         p = workdir / f"{u['id']}.extract.txt"
@@ -788,6 +822,7 @@ def assemble(workdir, outdir, book, bmap, units, content_units, model, partial, 
         f"language: {yaml_value(md.get('language', ''))}",
         f"domains: {yaml_value(bmap.get('domains', []))}",
         f"conditions: {yaml_value(bmap.get('conditions', []))}",
+        f"conditions_secondary: {yaml_value(bmap.get('conditions_secondary', []))}",
         f"authority_level_suggested: {yaml_value(bmap.get('authority_level', ''))}",
         f"authority_rationale: {yaml_value(bmap.get('authority_rationale', ''))}",
         f"author_credentials: {yaml_value(bmap.get('author_credentials', []))}",
@@ -850,6 +885,7 @@ def assemble(workdir, outdir, book, bmap, units, content_units, model, partial, 
         "nivel": bmap.get("authority_level", ""),
         "dominios": bmap.get("domains", []),
         "temas": bmap.get("conditions", []),
+        "temas_secundarios": bmap.get("conditions_secondary", []),
         "nota": bmap.get("authority_rationale", ""),
     }
     (outdir / f"{slug}_indice.json").write_text(json.dumps(indice, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -978,6 +1014,8 @@ def run_once(args):
         map_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     bmap = json.loads(map_file.read_text(encoding="utf-8"))
+    for w in clean_topics(bmap, clinical_topics(prompts["system"])):
+        print(f"  AVISO: {w}")
     units, problems = locate_units(book, bmap.get("units", []))
     for p in problems:
         print(f"  AVISO: {p}")
@@ -1001,7 +1039,7 @@ def run_once(args):
         partial = True
 
     bmap_compact = json.dumps({k: bmap.get(k) for k in
-                               ("metadata", "domains", "conditions", "abbreviation", "thesis", "units", "cross_unit_items")},
+                               ("metadata", "domains", "conditions", "conditions_secondary", "abbreviation", "thesis", "units", "cross_unit_items")},
                               ensure_ascii=False)
     map_tokens = len(bmap_compact) // 4
     errors = []
