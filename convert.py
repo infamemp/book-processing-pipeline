@@ -2,7 +2,7 @@
 """
 convert.py — Paso 1 del pipeline: libro (EPUB / PDF / otros) → Markdown limpio.
 
-Versión 2.3
+Versión 2.4
 
 QUÉ HACE
   EPUB : lee el libro capítulo por capítulo en el orden real de lectura (spine).
@@ -20,6 +20,9 @@ QUÉ HACE
              que el texto nativo desordena,
            - símbolos perdidos ("≥7%" leído como "$7%", "≤45%" como "#45%").
          Si la transcripción falla, se usa el texto nativo y queda en el reporte.
+         Desde 2.4, si Gemini bloquea una página por derechos de autor, se
+         vuelve a pedir SOLO sus tablas y recuadros (una tabla suelta casi
+         nunca se bloquea) y se agregan junto al texto nativo de la página.
   Otros: DOCX, PPTX, HTML, etc. se convierten con MarkItDown (sin imágenes).
 
 GARANTÍAS
@@ -68,7 +71,7 @@ from pathlib import Path
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
-CONVERTER_VERSION = "2.3"
+CONVERTER_VERSION = "2.4"
 
 # ── Modelo y precios ─────────────────────────────────────────────────────────
 
@@ -185,6 +188,25 @@ Rules:
   Never drop or replace a comparison sign; "≥7%" is not "7%".
 - If part of the page is unreadable, write [ILLEGIBLE] in that spot. Never guess."""
 
+TABLES_PROMPT = """\
+You are looking at ONE page of a book or article. Transcribe ONLY its tables,
+boxes/sidebars and key-point lists — NOT the running body text (that text is
+already available from another source).
+
+Output clean Markdown ONLY — no preamble, no comments, no code fences.
+
+Rules:
+- For each table: its caption line (e.g. "Table 12.2 ...") and then a Markdown
+  table with every row, column and header. Keep empty cells empty.
+- For each box/sidebar or key-points list: its title and its content, each line
+  preceded by "> ".
+- Include table footnotes and abbreviations printed under the table.
+- Use the same language as the page. Never translate.
+- Keep every number, unit and symbol exactly as printed: ≥ ≤ < > ± × µ ° %.
+- If the page has no tables, boxes or key-point lists, output exactly
+  [NO TABLES] and nothing else.
+- If part of a table is unreadable, write [ILLEGIBLE] in that cell. Never guess."""
+
 # Leyenda de tabla o recuadro al inicio de una línea ("Table 5.6", "Box 2.1",
 # "Cuadro 3"). Solo al inicio de línea: una referencia dentro del texto
 # ("ver Tabla 2") no hace que la página se transcriba completa.
@@ -260,6 +282,7 @@ class Job:
         self.token = f"ZZOCRZZ{self.key[:16]}ZZ"
         self.rule_reason = ""         # motivo si las reglas la consideran decorativa
         self.captioned = False        # tiene una leyenda "Tabla/Figura N" cerca
+        self.tables_text = ""         # tablas rescatadas si la página completa fue bloqueada
         # resultado
         self.status = None            # ok | cached | decorative | truncated | recitation | blocked | failed | skipped
         self.text = ""
@@ -312,6 +335,7 @@ class Report:
             ("  re-transcritas por tener leyenda de tabla/figura", "forced"),
             ("  truncadas", "truncated"),
             ("  bloqueadas por derechos de autor", "recitation"),
+            ("    rescatadas pidiendo solo tablas y recuadros", "tables_recovered"),
             ("  bloqueadas por seguridad", "blocked"),
             ("  fallidas tras reintentos", "failed"),
             ("  sin procesar (sin API key)", "skipped"),
@@ -450,6 +474,8 @@ class GeminiOCR:
         from google.genai import types
         if job.kind == "page":
             prompt = PAGE_PROMPT
+        elif job.kind == "tables":
+            prompt = TABLES_PROMPT
         elif job.kind == "image_forced":
             prompt = FORCED_NOTE + IMAGE_PROMPT
         else:
@@ -558,6 +584,15 @@ def render_job(job, report):
             return f"\n\n<!-- IMAGE: {job.label} -->\n{text}\n<!-- /IMAGE -->\n\n"
         return f"\n\n{text}\n\n"
 
+    if job.kind == "page" and job.tables_text and job.fallback_text.strip():
+        # Página bloqueada: texto nativo + sus tablas y recuadros leídos de la imagen.
+        report.inc("tables_recovered")
+        return (f"\n\n<!-- {job.label}: la página completa fue bloqueada ({job.reason}); "
+                f"texto nativo del PDF, seguido de sus tablas y recuadros transcritos de la "
+                f"imagen. Para los números de las tablas usar la versión transcrita. -->\n\n"
+                f"{job.fallback_text.strip()}\n\n"
+                f"<!-- TABLES FROM IMAGE: {job.label} -->\n{job.tables_text.strip()}\n<!-- /TABLES -->\n\n")
+
     report.problems.append((job.label, job.reason or job.status))
 
     if job.status == "truncated":
@@ -594,6 +629,29 @@ def recheck_captioned(ocr, jobs, report):
     for j in jobs:
         if j.key in result:
             j.status, j.text, j.reason = result[j.key]
+
+
+def retry_blocked_pages(ocr, jobs, report):
+    """
+    Páginas completas que Gemini bloqueó por derechos de autor: se vuelve a
+    pedir solo sus tablas y recuadros. El texto corrido de esas páginas se
+    queda con el texto nativo del PDF (render_job une las dos partes).
+    """
+    targets = [j for j in unique_jobs(jobs)
+               if j.kind == "page" and j.status == "recitation" and j.fallback_text.strip()]
+    if not targets:
+        return
+    print(f"\nGemini bloqueó {len(targets)} página(s) completa(s); se piden solo sus tablas y recuadros...")
+    retry = [Job(j.image_bytes, j.mime, j.label + ", solo tablas", "tables") for j in targets]
+    ocr.run(retry)
+    rescued = {}
+    for j, r in zip(targets, retry):
+        text = (r.text or "").strip()
+        if r.status in ("ok", "cached") and text and text != "[NO TABLES]":
+            rescued[j.key] = text
+    for j in jobs:
+        if j.key in rescued:
+            j.tables_text = rescued[j.key]
 
 
 def confirm_cost(ocr, jobs, model, assume_yes):
@@ -1078,6 +1136,7 @@ def convert_pdf(path, ocr, report, assume_yes):
         sys.exit("Cancelado. No se escribió nada.")
     ocr.run(jobs)
     recheck_captioned(ocr, jobs, report)
+    retry_blocked_pages(ocr, jobs, report)
 
     rendered = {}
     for j in jobs:
