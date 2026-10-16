@@ -2,7 +2,7 @@
 """
 convert.py — Paso 1 del pipeline: libro (EPUB / PDF / otros) → Markdown limpio.
 
-Versión 2.4
+Versión 2.5
 
 QUÉ HACE
   EPUB : lee el libro capítulo por capítulo en el orden real de lectura (spine).
@@ -18,7 +18,9 @@ QUÉ HACE
            - texto dañado (letras corridas por la codificación de la fuente),
            - tablas o recuadros con leyenda ("Table 5.6", "Box 2.1", "Cuadro 3"),
              que el texto nativo desordena,
-           - símbolos perdidos ("≥7%" leído como "$7%", "≤45%" como "#45%").
+           - símbolos perdidos ("≥7%" leído como "$7%", "≤45%" como "#45%";
+             desde 2.5 también "<2,300" leído como ",2,300", ">3,500" como
+             ".3,500" y signos convertidos en "##" antes de un número).
          Si la transcripción falla, se usa el texto nativo y queda en el reporte.
          Desde 2.4, si Gemini bloquea una página por derechos de autor, se
          vuelve a pedir SOLO sus tablas y recuadros (una tabla suelta casi
@@ -71,7 +73,7 @@ from pathlib import Path
 from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
-CONVERTER_VERSION = "2.4"
+CONVERTER_VERSION = "2.5"
 
 # ── Modelo y precios ─────────────────────────────────────────────────────────
 
@@ -213,8 +215,17 @@ Rules:
 VISION_CAPTION_RE = re.compile(
     r"(?mi)^\s*(?:#+\s*)?(?:Table|Tabla|Cuadro|Box|Recuadro|Panel|Exhibit)\s*[A-Z]?\d+(?:[.\-]\d+)?\b")
 
-# Signo ≥ / ≤ perdido por la codificación de la fuente: "$7%", "#45%".
-SYMBOL_LOSS_RE = re.compile(r"(?<![\w$#])[#$]\s?\d+(?:[.,]\d+)?\s?%")
+# Signo ≥ / ≤ / < / > perdido por la codificación de la fuente. Formas vistas:
+#   "$7%" / "#45%"     (≥ / ≤ antes de un porcentaje)
+#   ",2,300" / ",63 g" (< leído como coma pegada al número)
+#   ".3,500"           (> leído como punto antes de una cifra con miles)
+#   "##30"             (signo leído como ##)
+SYMBOL_LOSS_RE = re.compile(
+    r"(?<![\w$#])[#$]\s?\d+(?:[.,]\d+)?\s?%"
+    r"|(?:(?<=[\s(\[])|^),\d"
+    r"|(?:(?<=[\s(\[])|^)\.\d{1,3},\d{3}\b"
+    r"|(?<!\S)##\s?\d",
+    re.MULTILINE)
 
 # Palabras muy comunes (inglés y español) para detectar texto con letras corridas.
 STOP_WORDS = {
