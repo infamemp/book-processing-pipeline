@@ -34,7 +34,9 @@ La forma fácil: arrastras el libro, apruebas el costo con un botón y eliges la
 | `<libro>_indice.json` | Metadatos listos para `kb_indice.json`. |
 | `<libro>_reporte.txt` | Cobertura, avisos de la verificación de números y costo. |
 
-Dominios: `endurance-sport`, `strength-training`, `senior-health`, `nutrition` (con los 10 códigos de condición del sistema clínico), `general`.
+Dominios: `endurance-sport`, `strength-training`, `senior-health`, `nutrition`, `general`.
+
+Temas clínicos (solo libros de nutrición): 37 temas más `general`, con su definición, en `extraction_prompts.md` (vocabulario v2.0). Cada libro lleva temas principales y secundarios; el `_indice.json` los guarda en `temas` y `temas_secundarios`. Si la IA usa un código que no está en la lista, se omite y aparece en el reporte.
 
 ## Cómo funciona
 
