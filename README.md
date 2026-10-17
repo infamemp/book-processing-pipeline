@@ -42,13 +42,13 @@ Temas clínicos (solo libros de nutrición): 37 temas más `general`, con su def
 
 1. **convert.py**: EPUB/PDF → Markdown. Las imágenes y tablas de imagen se transcriben con Gemini (se guarda caché y un reporte de lo descartado). En PDF, las páginas cuyo texto nativo no es confiable (texto con letras corridas, tablas o recuadros con leyenda, signos ≥/≤ perdidos) se transcriben completas como imagen. Si Gemini bloquea una página por derechos de autor, se piden solo sus tablas y recuadros y se agregan junto al texto nativo.
 2. **extract.py** (Claude Sonnet 5.5 + Gemini 3.8 Flash):
-   - MAP: metadatos, dominio, nivel de autoridad y división en capítulos.
+   - MAP: metadatos, dominio, nivel de autoridad y división en capítulos. Al ubicar cada capítulo se salta el índice del libro (una lista de títulos seguidos) y se avisa si alguna unidad quedó casi vacía.
    - EXTRACT: una llamada por capítulo.
    - VERIFY: Gemini compara lo extraído contra el texto; corrige, agrega lo que faltó y elimina lo inventado.
    - SYNTHESIS: panorama, Modelo Integral y notas de vigencia.
    - Revisión automática de números que no están en el capítulo.
 
-Todo queda guardado en `_work_<libro>`. Si algo falla, al repetir el comando solo se hace lo que falta.
+Todo queda guardado en `_work_<libro>`. Si algo falla, al repetir el comando solo se hace lo que falta. Si cambian los límites de un capítulo (por ejemplo, tras un arreglo del programa), ese capítulo y la síntesis se rehacen solos.
 
 ## Modos y costo
 

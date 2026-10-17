@@ -74,7 +74,7 @@ try:
 except ImportError:
     sys.exit("Falta el SDK de Anthropic. Instala con:  pip install --upgrade anthropic")
 
-EXTRACTOR_VERSION = "3.4"
+EXTRACTOR_VERSION = "3.5"
 
 # ── Modelos y precios (USD por millón de tokens) ─────────────────────────────
 # Fuentes: platform.claude.com/docs y ai.google.dev/gemini-api/docs/pricing (sep 2026).
@@ -245,6 +245,17 @@ def fill(template, **fields):
     return template
 
 
+STRAY_MARK_RE = re.compile(r"^[ \t]*>{2,3}[ \t]*$\n?", re.M)
+
+
+def clean_body(body):
+    """Quita restos de la marca de entrada (una línea con solo '>>' o '>>>') que el modelo
+    a veces deja al inicio o dentro del cuerpo."""
+    body = body.strip()
+    body = re.sub(r"\A>[ \t]*\n", "", body)        # '>' suelto en la primera línea
+    return STRAY_MARK_RE.sub("", body).strip()
+
+
 def parse_entries(text, keep_junk=False):
     out = []
     for m in ENTRY_RE.finditer(text):
@@ -256,7 +267,7 @@ def parse_entries(text, keep_junk=False):
                 attrs["dest"] = bm.group(1)
         dest = attrs.get("dest", "").strip().upper()
         title = attrs.get("title", "").strip()
-        body = m.group(2).strip()
+        body = clean_body(m.group(2))
         junk = (not body) or "PLACEHOLDER" in dest or title.lower() == "placeholder"
         if junk and not keep_junk:
             continue
@@ -860,30 +871,56 @@ def synthesis_material(workdir, units, max_chars):
 # Unidades
 # ═════════════════════════════════════════════════════════════════════════════
 
-def locate_units(book, units):
-    """Ubica el inicio de cada unidad en el libro. Devuelve lista con 'a' y 'b' (posiciones)."""
+TOC_NEIGHBORS = 3     # líneas no vacías antes y después que se revisan
+TOC_MIN_HITS = 2      # vecinos que son inicios de otras unidades → parece índice
+
+
+def locate_units(book, units, skip_toc=True):
+    """Ubica el inicio de cada unidad en el libro. Devuelve lista con 'a' y 'b' (posiciones).
+
+    Si el título de un capítulo aparece primero en el índice del libro (una lista de títulos
+    seguidos), esa coincidencia se salta y se usa la siguiente, donde empieza el texto real."""
     lines = book.split("\n")
     offsets, pos = [], 0
     for ln in lines:
         offsets.append(pos)
         pos += len(ln) + 1
+    starts = {u.get("start", "").strip() for u in units if u.get("start", "").strip()}
+    nonempty = [i for i, ln in enumerate(lines) if ln.strip()]
+    rank = {i: k for k, i in enumerate(nonempty)}
+
+    def toc_hits(i, own):
+        """Cuántas líneas vecinas (no vacías) son el inicio de otra unidad."""
+        k = rank.get(i)
+        if k is None:
+            return 0
+        near = nonempty[max(0, k - TOC_NEIGHBORS):k] + nonempty[k + 1:k + 1 + TOC_NEIGHBORS]
+        return sum(1 for j in near if lines[j].strip() in starts and lines[j].strip() != own)
 
     def find_line(start_text, from_idx):
         target = start_text.strip()
-        for i in range(from_idx, len(lines)):
-            if lines[i].strip() == target:
-                return i
-        for i in range(from_idx, len(lines)):       # coincidencia parcial
-            if target and target in lines[i]:
-                return i
-        return None
+        if not target:
+            return None, False
+        for match in (lambda ln: ln.strip() == target, lambda ln: target in ln):
+            hits = [i for i in range(from_idx, len(lines)) if match(lines[i])]
+            if not hits:
+                continue
+            if not skip_toc or toc_hits(hits[0], target) < TOC_MIN_HITS:
+                return hits[0], False
+            for i in hits[1:]:                      # la primera parece del índice
+                if toc_hits(i, target) < TOC_MIN_HITS:
+                    return i, True
+            return hits[0], False
+        return None, False
 
-    located, idx, problems = [], 0, []
+    located, idx, problems, skipped = [], 0, [], []
     for u in units:
-        i = find_line(u.get("start", ""), idx)
+        i, toc = find_line(u.get("start", ""), idx)
         if i is None:
             problems.append(f"{u['id']}: no encontré su línea de inicio: {u.get('start', '')[:80]}")
             continue
+        if toc:
+            skipped.append(u["id"])
         located.append(dict(u, line=i))
         idx = i + 1
     if located:
@@ -894,7 +931,48 @@ def locate_units(book, units):
         u["end"] = lines[located[k + 1]["line"]].strip() if k + 1 < len(located) else "(end of book)"
         u["start_line"] = lines[u["line"]].strip()
         u["chars"] = u["b"] - u["a"]
+    if skipped:
+        problems.append(f"índice del libro saltado al ubicar: {', '.join(skipped)}")
+    tiny = [u["id"] for u in located if u.get("kind") == "content" and u["chars"] < TINY_UNIT_CHARS]
+    if tiny:
+        problems.append(f"unidades casi vacías (menos de {TINY_UNIT_CHARS} caracteres): {', '.join(tiny)}. "
+                        "Revisa que el MAP haya ubicado bien los capítulos.")
     return located, problems
+
+
+TINY_UNIT_CHARS = 400
+
+
+def sync_unit_cache(workdir, units, book, map_units):
+    """Si una unidad cambió de límites desde la corrida anterior (p. ej. por un arreglo al
+    ubicar capítulos), borra su extracción y verificación guardadas, y la síntesis, para
+    rehacerlas. Devuelve los IDs que se rehacen.
+
+    Trabajos hechos antes de la 3.5 no tienen units.json: se comparan contra la forma
+    anterior de ubicar (sin saltar el índice), así solo se rehacen los libros afectados."""
+    f = workdir / "units.json"
+    now = {u["id"]: [u["a"], u["b"]] for u in units}
+    try:
+        before = json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+    except (OSError, ValueError):
+        before = None
+    if before is None and any(workdir.glob("U*.extract.txt")):
+        old, _ = locate_units(book, map_units, skip_toc=False)
+        before = {u["id"]: [u["a"], u["b"]] for u in old}
+    redo = []
+    if before is not None:
+        for uid, span in now.items():
+            if uid in before and before[uid] != span:
+                for suffix in ("extract.txt", "verify.txt"):
+                    p = workdir / f"{uid}.{suffix}"
+                    if p.exists():
+                        p.unlink()
+                    fatal_marker(p).unlink(missing_ok=True)
+                redo.append(uid)
+        if redo:
+            (workdir / "synthesis.txt").unlink(missing_ok=True)
+    f.write_text(json.dumps(now), encoding="utf-8")
+    return redo
 
 
 def apply_verify(entries, verify_text):
@@ -959,7 +1037,7 @@ def assemble(workdir, outdir, book, bmap, units, content_units, model, partial, 
     abbr = re.sub(r"[^A-Z0-9]", "", (bmap.get("abbreviation") or "BK").upper())[:6] or "BK"
 
     by_dest = {c: [] for c, _ in CORE_SECTIONS + LIBRARY_SECTIONS}
-    logs, warnings, stats = [], list(bmap.get("_topic_warnings", [])), {"entries": 0, "corrected": 0, "added": 0, "deleted": 0, "bad_dest": 0}
+    logs, warnings, stats = [], list(bmap.get("_topic_warnings", [])) + list(bmap.get("_unit_warnings", [])), {"entries": 0, "corrected": 0, "added": 0, "deleted": 0, "bad_dest": 0}
 
     for u in content_units:
         p = workdir / f"{u['id']}.extract.txt"
@@ -1281,6 +1359,10 @@ def run_once(args):
         print(f"  AVISO: {p}")
     if not units:
         sys.exit("ERROR: no se pudo ubicar ninguna unidad del MAP en el libro. Revisa map_raw.txt")
+    bmap["_unit_warnings"] = [f"MAP: {p}" for p in problems]
+    redo = sync_unit_cache(workdir, units, book, bmap.get("units", []))
+    if redo:
+        print(f"  Cambiaron los límites de {len(redo)} unidad(es); se rehacen: {', '.join(redo)}")
     if not getattr(args, "_printed", False):
         print_map(bmap, units)
         args._printed = True
