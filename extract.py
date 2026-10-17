@@ -2,7 +2,7 @@
 """
 extract.py — Paso 2 del pipeline: libro convertido (.md) → KB (CORE + BIBLIOTECA).
 
-Versión 3.2
+Versión 3.4
 
 CÓMO FUNCIONA
   1. MAP        (Claude)  lee el libro, saca metadatos, dominio, nivel de autoridad
@@ -27,6 +27,15 @@ DOS MODOS
       lote terminó, descarga, avanza a la siguiente pasada y envía el siguiente
       lote. No hay que copiar ningún ID. En lote, cada capítulo se envía con su
       texto y el mapa del libro (no el libro completo), para no pagarlo 14 veces.
+
+LIBROS GRANDES (más de ~880 mil tokens, no caben en una llamada de Claude)
+  El MAP se hace en partes cortadas entre capítulos y se une en un solo mapa;
+  EXTRACT recibe solo el capítulo + el mapa (también en modo inmediato) y
+  SYNTHESIS trabaja con las entradas ya extraídas y verificadas.
+
+  Si Anthropic rechaza una solicitud por un error que no se arregla
+  reintentando (p. ej. "prompt is too long"), el proceso se detiene con un
+  mensaje claro en lugar de volver a pedir aprobación.
 
   Todo queda guardado en la carpeta de trabajo (_work_<libro>): si algo falla o
   se interrumpe, al volver a correr solo se hace lo que falta.
@@ -65,7 +74,7 @@ try:
 except ImportError:
     sys.exit("Falta el SDK de Anthropic. Instala con:  pip install --upgrade anthropic")
 
-EXTRACTOR_VERSION = "3.3"
+EXTRACTOR_VERSION = "3.4"
 
 # ── Modelos y precios (USD por millón de tokens) ─────────────────────────────
 # Fuentes: platform.claude.com/docs y ai.google.dev/gemini-api/docs/pricing (sep 2026).
@@ -90,6 +99,15 @@ GEMINI_MODEL = "gemini-3.8-flash"
 GEMINI_PRICE = (0.75, 3.75) if datetime.now() < datetime(2027, 1, 1) else (1.50, 7.50)
 
 MAX_TOKENS = {"map": 32000, "extract": 64000, "verify": 65536, "synthesis": 64000}
+
+# Libros grandes: Claude acepta hasta 1,000,000 tokens de entrada por llamada.
+# Si el libro (más instrucciones y respuesta) no cabe, el MAP se hace por partes
+# (cortando entre capítulos), EXTRACT manda solo el capítulo y SYNTHESIS trabaja
+# con lo ya extraído en lugar del libro completo.
+CONTEXT_LIMIT = 1_000_000
+BIG_BOOK_TOKENS = 880_000       # más de esto = libro grande
+MAP_PART_TOKENS = 600_000       # tamaño máximo de cada parte del MAP
+SYNTH_MATERIAL_TOKENS = 700_000 # máximo de entradas extraídas que se le dan a SYNTHESIS
 EFFORT = {"map": "medium", "extract": "low", "synthesis": "medium"}
 DEFAULT_WORKERS = 3
 CALL_RETRIES = 3
@@ -268,6 +286,144 @@ def money(x):
     return f"${x:,.2f}"
 
 
+def fatal_marker(out):
+    """Archivo que marca una solicitud que Anthropic rechazó sin remedio."""
+    out = Path(out)
+    return out.with_name(out.name + ".FATAL")
+
+
+def save_fatal(out, msg):
+    fatal_marker(out).write_text(f"{EXTRACTOR_VERSION}|{msg}", encoding="utf-8")
+
+
+def read_fatal(out):
+    """Mensaje del rechazo, o None. Un rechazo guardado por otra versión del programa se
+    borra (la versión nueva puede ya no tener el problema) y se vuelve a intentar."""
+    f = fatal_marker(out)
+    if not f.exists():
+        return None
+    ver, _, msg = f.read_text(encoding="utf-8").partition("|")
+    if ver != EXTRACTOR_VERSION:
+        f.unlink(missing_ok=True)
+        return None
+    return msg
+
+
+def is_fatal_error(err):
+    """True si reintentar la misma solicitud no la arregla (400 invalid_request, etc.)."""
+    s = str(err)
+    return any(k in s for k in ("invalid_request_error", "prompt is too long", "not_found_error",
+                                "permission_error", "authentication_error"))
+
+
+def friendly_error(err):
+    s = str(err)
+    m = re.search(r"prompt is too long: (\d+) tokens > (\d+) maximum", s)
+    if m:
+        return (f"el texto es demasiado largo para Claude ({int(m.group(1)):,} tokens; "
+                f"máximo {int(m.group(2)):,})")
+    m = re.search(r"message='([^']+)'", s)
+    return (m.group(1) if m else s)[:200]
+
+
+def split_book(book, parts):
+    """Corta el libro en `parts` trozos consecutivos, en un inicio de capítulo cuando se puede.
+    Devuelve lista de (inicio, fin) en caracteres."""
+    if parts <= 1:
+        return [(0, len(book))]
+    lines = book.split("\n")
+    offsets, pos = [], 0
+    for ln in lines:
+        offsets.append(pos)
+        pos += len(ln) + 1
+    # preferencia: "# " (capítulo) > marcador de sección > "## " > cualquier línea en blanco
+    ranks = []
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("# "):
+            ranks.append((offsets[i], 0))
+        elif s.startswith("<!-- SECTION"):
+            ranks.append((offsets[i], 1))
+        elif s.startswith("## "):
+            ranks.append((offsets[i], 2))
+    cuts = [0]
+    size = len(book) / parts
+    for k in range(1, parts):
+        ideal = size * k
+        window = size * 0.25            # se acepta moverse hasta 25% de una parte
+        best = None
+        for rank in (0, 1, 2):
+            cands = [p for p, r in ranks if r == rank and abs(p - ideal) <= window and p > cuts[-1]]
+            if cands:
+                best = min(cands, key=lambda p: abs(p - ideal))
+                break
+        if best is None:                # sin encabezados cerca: la línea más cercana
+            best = min((o for o in offsets if o > cuts[-1]), key=lambda o: abs(o - ideal))
+        cuts.append(best)
+    cuts.append(len(book))
+    return [(cuts[i], cuts[i + 1]) for i in range(parts)]
+
+
+def merge_maps(maps):
+    """Une los mapas de las partes de un libro grande en uno solo."""
+    if len(maps) == 1:
+        return maps[0]
+
+    def union(key):
+        out = []
+        for m in maps:
+            for x in m.get(key) or []:
+                if x not in out:
+                    out.append(x)
+        return out
+
+    first = maps[0]
+    merged = dict(first)
+    md = dict(first.get("metadata") or {})
+    for m in maps[1:]:
+        for k, v in (m.get("metadata") or {}).items():
+            if v and not md.get(k):
+                md[k] = v
+    merged["metadata"] = md
+    # ids nuevos y consecutivos (cada parte numeró las suyas como P<k>U01...)
+    units = []
+    for m in maps:
+        rename = {}
+        for u in m.get("units") or []:
+            new = f"U{len(units) + 1:02d}"
+            if u.get("id"):
+                rename[str(u["id"])] = new
+            units.append(dict(u, id=new))
+        if m.get("cross_unit_items"):
+            fixed = []
+            for item in m["cross_unit_items"]:
+                s = str(item)
+                for old in sorted(rename, key=len, reverse=True):
+                    s = re.sub(rf"\b{re.escape(old)}\b", rename[old], s)
+                fixed.append(s)
+            m["cross_unit_items"] = fixed
+    for key in ("author_credentials", "domains", "conditions", "conditions_secondary",
+                "cross_unit_items", "notes"):
+        merged[key] = union(key)
+    merged["conditions_secondary"] = [c for c in merged["conditions_secondary"]
+                                      if c not in merged["conditions"]]
+    if len(merged["domains"]) > 1 and "general" in merged["domains"]:
+        merged["domains"] = [d for d in merged["domains"] if d != "general"]
+    ci = []
+    for m in maps:
+        v = (m.get("commercial_interests") or "").strip()
+        if v and v not in ci:
+            ci.append(v)
+    merged["commercial_interests"] = "; ".join(ci)
+    for key in ("proposed_domain", "authority_level", "authority_rationale", "abbreviation", "slug", "thesis"):
+        if not merged.get(key):
+            merged[key] = next((m.get(key) for m in maps if m.get(key)),
+                               None if key == "proposed_domain" else "")
+    merged["units"] = units
+    merged["_map_parts"] = len(maps)
+    return merged
+
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Registro de uso y costos
@@ -333,6 +489,29 @@ class Claude:
 
     def content_full_book(self, task):
         return [self.book_block(), {"type": "text", "text": task}]
+
+    @staticmethod
+    def content_book_part(part_text, k, n, task):
+        note = (f"NOTE: this book is too long for a single call, so it is split into {n} consecutive "
+                f"parts. You receive ONLY part {k} of {n} (inside <book_part>). Do the MAP task for "
+                f"THIS PART ONLY:\n"
+                f"- `units` must cover this part from its first line to its last, with no gaps; "
+                f"the first unit starts at the first line of the part. Number them P{k}U01, P{k}U02, ...\n"
+                f"- Fill metadata, credentials, domains, topics, authority and thesis with what this "
+                f"part shows; leave a field empty if this part does not show it (another part will).\n\n")
+        return [{"type": "text", "text": f"<book_part n=\"{k}\" of=\"{n}\">\n" + part_text + "\n</book_part>"},
+                {"type": "text", "text": note + task}]
+
+    @staticmethod
+    def content_material(material, task):
+        """SYNTHESIS de un libro grande: las entradas ya extraídas en lugar del libro."""
+        note = ("NOTE: this book is too long to attach in full. Instead of the book you receive "
+                "(inside <extracted_entries>) the detailed entries already extracted and verified "
+                "from every unit, in book order. Treat them as the book's content: base every "
+                "statement on them, the map and the unit summaries, and do not add anything "
+                "they do not support. Wherever the task says to re-read the book, use them.\n\n")
+        return [{"type": "text", "text": "<extracted_entries>\n" + material + "\n</extracted_entries>"},
+                {"type": "text", "text": note + task}]
 
     @staticmethod
     def content_unit(unit_text, task):
@@ -443,7 +622,7 @@ class Claude:
                 return "waiting"
             say(f"\n  Lote {stage} terminado. Descargando resultados...")
             outs = {j["custom_id"]: j for j in st["jobs"]}
-            failed = []
+            failed, fatal = [], []
             for r in self.client.messages.batches.results(st["batch_id"]):
                 j = outs.get(r.custom_id)
                 if not j:
@@ -459,11 +638,17 @@ class Claude:
                         + ("  ⚠ TRUNCADO" if msg.stop_reason == "max_tokens" else ""))
                 else:
                     err = getattr(r.result, "error", r.result.type)
-                    failed.append(j["label"])
-                    say(f"  ✗ {j['label']}: {str(err)[:150]}")
+                    if is_fatal_error(err):
+                        # Reintentar no lo arregla: se marca y no se vuelve a enviar
+                        save_fatal(j["out"], friendly_error(err))
+                        fatal.append(j["label"])
+                        say(f"  ✗ {j['label']}: {friendly_error(err)}  (no se reintenta)")
+                    else:
+                        failed.append(j["label"])
+                        say(f"  ✗ {j['label']}: {str(err)[:150]}")
             sf.rename(sf.with_name(f"batch_{stage}_{st['batch_id'][-8:]}_done.json"))
             if failed:
-                say(f"  {len(failed)} solicitud(es) fallaron; se reenviarán en la siguiente corrida.")
+                say(f"  {len(failed)} solicitud(es) fallaron por un error temporal; se reenviarán en la siguiente corrida.")
             return "done"
 
         if not jobs:
@@ -632,6 +817,43 @@ def synthesis_task(prompts, workdir, bmap_compact, units):
     entry_index = "\n".join(f"{d}: " + " · ".join(t) for d, t in sorted(index.items()))
     return fill(prompts["synthesis"], map=bmap_compact, summaries="\n\n".join(summaries), entry_index=entry_index)
 
+
+def synthesis_material(workdir, units, max_chars):
+    """Entradas extraídas (ya verificadas) de todas las unidades, en orden, para SYNTHESIS
+    de un libro grande. Si no caben, primero se quitan los catálogos (L1-L5) y luego se
+    acortan las entradas. Devuelve (texto, nota)."""
+    per_unit = []
+    for u in units:
+        p = workdir / f"{u['id']}.extract.txt"
+        if not p.exists():
+            continue
+        ents = content_entries(p.read_text(encoding="utf-8"))
+        v = workdir / f"{u['id']}.verify.txt"
+        if v.exists():
+            ents, _, _ = apply_verify(ents, v.read_text(encoding="utf-8"))
+        ents = [e for e in ents if e["dest"] in VALID_DEST and e["dest"] not in ("LOG", "DELETE", "SUMMARY")]
+        per_unit.append((u, ents))
+
+    def render(keep_library, cut):
+        out = []
+        for u, ents in per_unit:
+            out.append(f"## {u['id']} — {u.get('title', '')}")
+            for e in ents:
+                if not keep_library and e["dest"].startswith("L"):
+                    continue
+                body = e["body"] if not cut or len(e["body"]) <= cut else e["body"][:cut] + " [...]"
+                out.append(f"[{e['dest']}] {e['title']}\n{body}")
+            out.append("")
+        return "\n\n".join(out)
+
+    for keep_library, cut, nota in ((True, 0, "completas"),
+                                    (False, 0, "sin los catálogos L1-L5 (no cabían)"),
+                                    (False, 2500, "sin catálogos y acortadas a 2,500 caracteres (no cabían)"),
+                                    (False, 1000, "sin catálogos y acortadas a 1,000 caracteres (no cabían)")):
+        text = render(keep_library, cut)
+        if len(text) <= max_chars:
+            return text, nota
+    return text[:max_chars], "recortadas al máximo (no cabían)"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -982,35 +1204,73 @@ def run_once(args):
           f"{'no' if args.no_verify else GEMINI_MODEL}")
     book_tokens = claude.count_book_tokens()
     print(f"Tokens del libro: ~{book_tokens:,}")
+    big = book_tokens > BIG_BOOK_TOKENS
+    tok_per_char = book_tokens / max(1, len(book))
+    if big:
+        print(f"  LIBRO GRANDE: no cabe completo en una llamada de Claude (máx. {CONTEXT_LIMIT:,} tokens).")
+        print("  El MAP se hace por partes y cada pasada usa solo el texto que necesita.")
 
     # ── 1) MAP ──────────────────────────────────────────────────────────────
     map_file, map_raw = workdir / "map.json", workdir / "map_raw.txt"
     if not map_file.exists():
-        job = {"id": "MAP", "label": "MAP", "out": map_raw,
-               "params": claude.params(claude.content_full_book(prompts["map"]), MAX_TOKENS["map"], EFFORT["map"])}
+        if big:
+            n_parts = -(-book_tokens // MAP_PART_TOKENS)        # división hacia arriba
+            spans = split_book(book, n_parts)
+            map_jobs = []
+            for k, (a, b) in enumerate(spans, 1):
+                out = workdir / f"map_raw_p{k}.txt"
+                map_jobs.append({"id": f"MAP-P{k}", "label": f"MAP P{k}", "out": out, "tokens": int((b - a) * tok_per_char),
+                                 "params": claude.params(claude.content_book_part(book[a:b], k, n_parts, prompts["map"]),
+                                                         MAX_TOKENS["map"], EFFORT["map"])})
+        else:
+            map_jobs = [{"id": "MAP", "label": "MAP", "out": map_raw, "tokens": book_tokens,
+                         "params": claude.params(claude.content_full_book(prompts["map"]), MAX_TOKENS["map"], EFFORT["map"])}]
+
+        # Rechazos sin remedio de corridas anteriores: no se vuelve a pedir aprobación
+        fatal = [(j, read_fatal(j["out"])) for j in map_jobs]
+        fatal = [(j, m) for j, m in fatal if m]
+        if fatal:
+            j, m = fatal[0]
+            sys.exit(f"ERROR: Anthropic rechazó el {j['label']}: {m}. "
+                     "Reintentar no lo arregla; hay que corregir el programa o el libro.")
+
         pending_batch = claude.batch_state_file("map").exists()
-        if not map_raw.exists() and not pending_batch:
+        todo = [j for j in map_jobs if not j["out"].exists()]
+        if todo and not pending_batch:
             if args.batch:
-                est = (book_tokens * pin + 9000 * pout) / 1e6 * disc
+                est = sum(j["tokens"] * pin + 9000 * pout for j in todo) / 1e6 * disc
             else:
-                est = (book_tokens * pin * CACHE_WRITE_MULT + 9000 * pout) / 1e6
-            if not confirm([f"Pasada 1 — MAP ({model}, {mode.lower()})",
+                mult = 1.0 if big else CACHE_WRITE_MULT     # libro grande: no se guarda en caché
+                est = sum(j["tokens"] * pin * mult + 9000 * pout for j in todo) / 1e6
+            partes = f", {len(todo)} parte(s)" if big else ""
+            if not confirm([f"Pasada 1 — MAP ({model}, {mode.lower()}{partes})",
                             f"Costo estimado: ~{money(est)} USD"], args.yes, costo=round(est, 2)):
                 sys.exit("Cancelado.")
-        if not map_raw.exists():
+        if todo or pending_batch:
             if args.batch:
-                st = claude.run_batch("map", [job])
-                if st != "done" or not map_raw.exists():
+                st = claude.run_batch("map", todo if not pending_batch else [])
+                bad = [j for j in map_jobs if read_fatal(j["out"])]
+                if bad:
+                    sys.exit(f"ERROR: Anthropic rechazó el {bad[0]['label']}: "
+                             f"{read_fatal(bad[0]['out'])}. "
+                             "Reintentar no lo arregla; hay que corregir el programa o el libro.")
+                if st != "done" or any(not j["out"].exists() for j in map_jobs):
                     return "pending"
             else:
-                say("\nMAP: leyendo el libro completo...")
-                errs = claude.run_immediate([job], 1)
+                say("\nMAP: leyendo el libro" + (f" en {len(todo)} parte(s)..." if big else " completo..."))
+                errs = claude.run_immediate(todo, max(1, args.workers) if big else 1)
                 if errs:
-                    sys.exit("No se pudo completar el MAP.")
-        try:
-            data = parse_json(map_raw.read_text(encoding="utf-8"))
-        except Exception as e:
-            sys.exit(f"ERROR: MAP no devolvió un JSON válido ({e}). Revisa {map_raw}")
+                    sys.exit("No se pudo completar el MAP: " + "; ".join(errs))
+        parts_data = []
+        for j in map_jobs:
+            try:
+                parts_data.append(parse_json(j["out"].read_text(encoding="utf-8")))
+            except Exception as e:
+                bad = j["out"].with_name(j["out"].stem + "_invalido.txt")
+                j["out"].replace(bad)             # se guarda para revisar; Reanudar lo repite
+                sys.exit(f"ERROR: {j['label']} no devolvió un JSON válido ({e}). Quedó en {bad.name}; "
+                         "con Reanudar se vuelve a pedir solo esa parte.")
+        data = merge_maps(parts_data)
         map_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     bmap = json.loads(map_file.read_text(encoding="utf-8"))
@@ -1050,9 +1310,14 @@ def run_once(args):
             out = workdir / f"{u['id']}.extract.txt"
             if out.exists():
                 continue
+            if read_fatal(out):   # Anthropic la rechazó sin remedio: no se reenvía
+                msg = f"EXTRACT {u['id']}: {read_fatal(out)} (no se reintenta)"
+                if msg not in errors:
+                    errors.append(msg)
+                continue
             task = fill(prompts["extract"], map=bmap_compact, unit_id=u["id"], unit_title=u.get("title", ""),
                         unit_start=u["start_line"], unit_end=u["end"])
-            content = (claude.content_unit(book[u["a"]:u["b"]], task) if args.batch
+            content = (claude.content_unit(book[u["a"]:u["b"]], task) if (args.batch or big)
                        else claude.content_full_book(task))
             jobs.append({"id": f"EXTRACT-{u['id']}", "label": f"EXTRACT {u['id']}", "out": out, "unit": u,
                          "params": claude.params(content, MAX_TOKENS["extract"], EFFORT["extract"])})
@@ -1060,7 +1325,7 @@ def run_once(args):
 
     def estimate(jobs_ext, verify_units_list, do_synth):
         lines, total = [], 0.0
-        cache_needed = not args.batch and not usage.cache_alive(model) and (jobs_ext or do_synth)
+        cache_needed = not args.batch and not big and not usage.cache_alive(model) and (jobs_ext or do_synth)
         if cache_needed:
             c = book_tokens * pin * CACHE_WRITE_MULT / 1e6
             lines.append(f"Guardar el libro en caché (1 h)        ~{money(c)}")
@@ -1070,7 +1335,7 @@ def run_once(args):
             for j in jobs_ext:
                 ut = j["unit"]["chars"] // 4
                 out_t = 0.6 * ut + 3000
-                inp_t = (ut + map_tokens + 3500) * pin if args.batch else book_tokens * pin * rmult
+                inp_t = (ut + map_tokens + 3500) * pin if (args.batch or big) else book_tokens * pin * rmult
                 c += (inp_t + out_t * pout) / 1e6 * disc
             lines.append(f"EXTRACT   {len(jobs_ext):>2} unidad(es) (Claude)       ~{money(c)}")
             total += c
@@ -1080,7 +1345,11 @@ def run_once(args):
             lines.append(f"VERIFY    {len(verify_units_list):>2} unidad(es) (Gemini)       ~{money(c)}")
             total += c
         if do_synth:
-            c = ((book_tokens * pin if args.batch else book_tokens * pin * rmult) + 20000 * pout) / 1e6 * disc
+            if big:   # entradas extraídas (~60% del libro, con tope) en lugar del libro
+                inp_t = min(0.6 * book_tokens, SYNTH_MATERIAL_TOKENS) + map_tokens + 20000
+                c = (inp_t * pin + 20000 * pout) / 1e6 * disc
+            else:
+                c = ((book_tokens * pin if args.batch else book_tokens * pin * rmult) + 20000 * pout) / 1e6 * disc
             lines.append(f"SYNTHESIS  1 llamada (Claude)           ~{money(c)}")
             total += c
         lines.append(f"Total estimado: ~{money(total)} USD" + ("  (modo lote, -50%)" if args.batch else ""))
@@ -1096,11 +1365,13 @@ def run_once(args):
         if st != "done":
             return "pending"
         jobs = extract_jobs()
+    synth_approved = False
     if jobs:
         ver_list = [] if args.no_verify else [j["unit"] for j in jobs]
         if not confirm([f"Pasadas pendientes ({model}, {mode.lower()}):"]
                        + estimate(jobs, ver_list, want_synth), args.yes):
             sys.exit("Cancelado. Lo ya hecho quedó guardado en la carpeta de trabajo.")
+        synth_approved = want_synth
         if args.batch:
             claude.run_batch("extract", jobs)
             return "pending"
@@ -1139,19 +1410,31 @@ def run_once(args):
 
     # ── 4) SYNTHESIS ────────────────────────────────────────────────────────
     if want_synth:
-        missing = [u["id"] for u in content_units if not (workdir / f"{u['id']}.extract.txt").exists()]
+        missing = [u["id"] for u in content_units if not (workdir / f"{u['id']}.extract.txt").exists()
+                   and not read_fatal(workdir / f"{u['id']}.extract.txt")]
         if missing:
             print(f"\nSYNTHESIS pospuesta: faltan unidades por extraer: {', '.join(missing)}")
+        elif read_fatal(synth_out):
+            errors.append(f"SYNTHESIS: {read_fatal(synth_out)} (no se reintenta)")
         else:
             task = synthesis_task(prompts, workdir, bmap_compact, content_units)
+            if big:
+                material, nota = synthesis_material(workdir, content_units,
+                                                    int(SYNTH_MATERIAL_TOKENS / max(tok_per_char, 0.1)))
+                say(f"\n  SYNTHESIS (libro grande): recibe las entradas extraídas {nota}.")
+                content = claude.content_material(material, task)
+            else:
+                content = claude.content_full_book(task)
             job = {"id": "SYNTHESIS", "label": "SYNTHESIS", "out": synth_out,
-                   "params": claude.params(claude.content_full_book(task), MAX_TOKENS["synthesis"], EFFORT["synthesis"])}
+                   "params": claude.params(content, MAX_TOKENS["synthesis"], EFFORT["synthesis"])}
             if args.batch:
                 st = claude.run_batch("synthesis", [job] if not claude.batch_state_file("synthesis").exists() else [])
-                if st != "done" or not synth_out.exists():
+                if read_fatal(synth_out):
+                    errors.append(f"SYNTHESIS: {read_fatal(synth_out)} (no se reintenta)")
+                elif st != "done" or not synth_out.exists():
                     return "pending"
             else:
-                if usage.cache_alive(model) or confirm(estimate([], [], True), args.yes):
+                if (big and synth_approved) or (not big and usage.cache_alive(model)) or confirm(estimate([], [], True), args.yes):
                     say("\nSYNTHESIS: panorama, principios, Modelo Integral y notas de vigencia...")
                     errors += claude.run_immediate([job], 1)
     if args.stage == "synthesis":
