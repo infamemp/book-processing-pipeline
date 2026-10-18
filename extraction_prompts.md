@@ -1,5 +1,9 @@
 <!--
-extraction_prompts.md — Instrucciones del paso 2 (extracción de KB), versión 3.1
+extraction_prompts.md — Instrucciones del paso 2 (extracción de KB), versión 3.2
+
+Cambios 3.2: el vocabulario de temas clínicos y la etiqueta `condition:` se usan
+en CUALQUIER libro clínico, sin importar su dominio (antes un libro de tiroides
+clasificado como `general` quedaba sin temas); el MAP declara `clinical_scope`.
 
 Cambios 3.1: vocabulario de temas clínicos v2.0 (37 temas + general, con
 definición de cada uno) y temas principales/secundarios en el MAP.
@@ -193,7 +197,10 @@ Universal (every entry):
 - `subtopic:` free, lowercase-hyphenated, specific (e.g. `subtopic:efficiency-factor`,
   `subtopic:gestational-diabetes`, `subtopic:caffeine`). Use it generously.
 
-Domain vocabularies (use only the block(s) of the domain(s) declared in MAP):
+Domain vocabularies (use only the block(s) of the domain(s) declared in MAP).
+Exception: the `condition:` tag of the nutrition block also applies to every
+book whose MAP `conditions` or `conditions_secondary` is not empty, whatever
+its domain (for example a thyroid treatment guideline):
 
 endurance-sport
 - `sport:` cycling · running · swimming · triathlon · general
@@ -230,6 +237,11 @@ general — no extra vocabulary (use universal tags only).
 # CLINICAL TOPIC VOCABULARY (v2.0, closed list)
 
 Used by `condition:` tags and by `conditions` / `conditions_secondary` in MAP.
+Any book that deals with a clinical condition, its medical treatment or its
+diet therapy (a guideline on thyroid, kidney or diabetes, a clinical nutrition
+book...) MUST declare at least one primary topic, whatever its domain, and
+every entry about a condition carries `condition:`. A book with no clinical
+content declares none.
 These codes are fixed: they match the clinical nutrition system's index, so
 never translate, rename, abbreviate or invent codes. Pick each topic by its
 definition, not by a word that happens to appear in the book.
@@ -311,6 +323,9 @@ Primary vs secondary topics (MAP):
 - Never list the same code in both.
 - A sports-nutrition book declares the `nutrition` domain (possibly together
   with `endurance-sport` or `strength-training`) and uses `deportista`.
+- A clinical book or guideline about a condition in the vocabulary also
+  declares the `nutrition` domain, because the clinical nutrition system looks
+  its sources up by condition, even when most of the book is about medication.
 
 A needed term that is not in the vocabulary: use `subtopic:` and mention it in
 the unit's LOG entry. Do not invent new closed tags.
@@ -382,8 +397,9 @@ with this structure:
   "commercial_interests": "products, supplements, programs or services the author promotes in the book; empty if none",
   "domains": ["endurance-sport | strength-training | senior-health | nutrition | general"],
   "proposed_domain": null,
-  "conditions": ["only for nutrition: PRIMARY codes from the CLINICAL TOPIC VOCABULARY"],
-  "conditions_secondary": ["only for nutrition: SECONDARY codes from the CLINICAL TOPIC VOCABULARY"],
+  "clinical_scope": false,
+  "conditions": ["PRIMARY codes from the CLINICAL TOPIC VOCABULARY; required when clinical_scope is true"],
+  "conditions_secondary": ["SECONDARY codes from the CLINICAL TOPIC VOCABULARY"],
   "authority_level": "A | B | C",
   "authority_rationale": "",
   "abbreviation": "2-6 uppercase letters for this book, e.g. HPC",
@@ -401,6 +417,10 @@ with this structure:
   "cross_unit_items": ["tables, definitions or models defined in one unit and used across the book, with their unit id"],
   "notes": ["anything a human should know: damaged content, NOT PROCESSED markers, oddities"]
 }
+
+`clinical_scope`: true if the book deals with any clinical condition, medical
+treatment, diet therapy or patient care (any domain); false otherwise. When it
+is true, `conditions` must not be empty.
 
 Unit rules:
 - Units are consecutive and cover the WHOLE text from its first line to its

@@ -38,6 +38,8 @@ Dominios: `endurance-sport`, `strength-training`, `senior-health`, `nutrition`, 
 
 Temas clínicos (solo libros de nutrición): 37 temas más `general`, con su definición, en `extraction_prompts.md` (vocabulario v2.0). Cada libro lleva temas principales y secundarios; el `_indice.json` los guarda en `temas` y `temas_secundarios`. Si la IA usa un código que no está en la lista, se omite y aparece en el reporte.
 
+Todo libro clínico (de cualquier dominio) debe terminar con al menos un tema principal. Si el MAP no lo declara, el programa se detiene antes de gastar en la extracción, aparta ese MAP (archivos `.sin_temas`) y al volver a correr el mismo comando repite solo el MAP; `--allow-no-topics` lo omite. Las etiquetas `condition:` de cada entrada se validan contra la lista (las desconocidas se quitan con aviso) y el reporte muestra los temas y cuántas entradas útiles para una dieta los llevan; si son menos de la mitad aparece un aviso `TEMAS:`.
+
 ## Cómo funciona
 
 1. **convert.py**: EPUB/PDF → Markdown. Las imágenes y tablas de imagen se transcriben con Gemini (se guarda caché y un reporte de lo descartado). En PDF, las páginas cuyo texto nativo no es confiable (texto con letras corridas, tablas o recuadros con leyenda, signos ≥/≤ perdidos) se transcriben completas como imagen. Si Gemini bloquea una página por derechos de autor, se piden solo sus tablas y recuadros y se agregan junto al texto nativo.

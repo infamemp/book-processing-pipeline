@@ -2,7 +2,7 @@
 """
 extract.py — Paso 2 del pipeline: libro convertido (.md) → KB (CORE + BIBLIOTECA).
 
-Versión 3.4
+Versión 3.6
 
 CÓMO FUNCIONA
   1. MAP        (Claude)  lee el libro, saca metadatos, dominio, nivel de autoridad
@@ -74,7 +74,7 @@ try:
 except ImportError:
     sys.exit("Falta el SDK de Anthropic. Instala con:  pip install --upgrade anthropic")
 
-EXTRACTOR_VERSION = "3.5"
+EXTRACTOR_VERSION = "3.6"
 
 # ── Modelos y precios (USD por millón de tokens) ─────────────────────────────
 # Fuentes: platform.claude.com/docs y ai.google.dev/gemini-api/docs/pricing (sep 2026).
@@ -111,6 +111,9 @@ SYNTH_MATERIAL_TOKENS = 700_000 # máximo de entradas extraídas que se le dan a
 EFFORT = {"map": "medium", "extract": "low", "synthesis": "medium"}
 DEFAULT_WORKERS = 3
 CALL_RETRIES = 3
+
+# Sections the clinical nutrition system reads to decide a diet (they should carry condition:)
+TOPIC_SECTIONS = ["C06", "C09", "C10", "C12", "C13", "C14"]
 
 CORE_SECTIONS = [
     ("C01", "Overview & Scope"),
@@ -237,6 +240,46 @@ def clean_topics(bmap, valid):
         bmap[key] = out
     bmap["_topic_warnings"] = warnings
     return warnings
+
+
+def missing_topics_problem(bmap):
+    """Text of the problem when a clinical book came out of MAP with no primary
+    topics (the clinical nutrition system could never find it), else None."""
+    clinical = bool(bmap.get("clinical_scope")) or "nutrition" in (bmap.get("domains") or [])
+    if clinical and not bmap.get("conditions"):
+        return ("El MAP no declaró ningún tema principal para un libro clínico "
+                f"(dominio: {', '.join(bmap.get('domains') or []) or '?'}). Sin temas, el sistema de "
+                "nutrición nunca usaría este libro.")
+    return None
+
+
+def fix_condition_tags(body, valid):
+    """Normalizes the `condition:` tokens of an entry's tags line: lowercase, no
+    duplicates, unknown codes removed. Returns (body, removed_codes, has_condition)."""
+    removed, has = [], False
+    lines = body.split("\n")
+    for i, ln in enumerate(lines):
+        if not ln.strip().lower().startswith("tags:"):
+            continue
+        out = []
+        for tok in ln.split():
+            if not tok.lower().startswith("condition:"):
+                out.append(tok)
+                continue
+            codes = []
+            for c in tok.split(":", 1)[1].split(","):
+                c = c.strip().lower()
+                if not c or c in codes:
+                    continue
+                if valid and c not in valid:
+                    removed.append(c)
+                    continue
+                codes.append(c)
+            if codes:
+                has = True
+                out.append("condition:" + ",".join(codes))
+        lines[i] = " ".join(out)
+    return "\n".join(lines), removed, has
 
 
 def fill(template, **fields):
@@ -1038,6 +1081,7 @@ def assemble(workdir, outdir, book, bmap, units, content_units, model, partial, 
 
     by_dest = {c: [] for c, _ in CORE_SECTIONS + LIBRARY_SECTIONS}
     logs, warnings, stats = [], list(bmap.get("_topic_warnings", [])) + list(bmap.get("_unit_warnings", [])), {"entries": 0, "corrected": 0, "added": 0, "deleted": 0, "bad_dest": 0}
+    valid_topics = set(bmap.get("_valid_topics") or [])
 
     for u in content_units:
         p = workdir / f"{u['id']}.extract.txt"
@@ -1058,6 +1102,11 @@ def assemble(workdir, outdir, book, bmap, units, content_units, model, partial, 
             warnings.append(f"{u['id']}: la extracción se cortó por longitud (revisar; dividir la unidad)")
         src = book[u["a"]:u["b"]]
         for e in ents:
+            e["body"], bad_codes, has_cond = fix_condition_tags(e["body"], valid_topics)
+            e["has_condition"] = has_cond
+            if bad_codes:
+                warnings.append(f"{u['id']} · {e['title'][:60]}: etiqueta condition: desconocida "
+                                f"({', '.join(sorted(set(bad_codes)))}); se quitó")
             if e["dest"] not in by_dest:
                 stats["bad_dest"] += 1
                 warnings.append(f"{u['id']}: entrada con sección desconocida '{e['dest']}' → C10: {e['title'][:60]}")
@@ -1085,6 +1134,24 @@ def assemble(workdir, outdir, book, bmap, units, content_units, model, partial, 
                     by_dest[e["dest"]].insert(0, e)
                 else:
                     by_dest[e["dest"]].append(e)
+
+    # Temas: cuántas entradas útiles para una dieta llevan etiqueta condition:
+    useful = [e for c in TOPIC_SECTIONS for e in by_dest.get(c, [])]
+    tagged = [e for e in useful if e.get("has_condition")]
+    topic_counts = {}
+    for e in tagged:
+        for m in re.finditer(r"condition:([a-z0-9_,]+)", e["body"]):
+            for c in m.group(1).split(","):
+                topic_counts[c] = topic_counts.get(c, 0) + 1
+    if bmap.get("conditions") or bmap.get("conditions_secondary"):
+        if useful and len(tagged) < 0.5 * len(useful):
+            warnings.insert(0, f"TEMAS: solo {len(tagged)} de {len(useful)} entradas útiles (secciones "
+                               f"{', '.join(TOPIC_SECTIONS)}) llevan condition:. El sistema de nutrición "
+                               "las encontraría poco; conviene repetir la extracción.")
+    else:
+        pb = missing_topics_problem(bmap)
+        if pb:
+            warnings.insert(0, "TEMAS: " + pb)
 
     # Glosario: sin duplicados (se queda la definición más completa)
     gl = {}
@@ -1204,6 +1271,12 @@ def assemble(workdir, outdir, book, bmap, units, content_units, model, partial, 
          "Por sección:"]
     for code, name in CORE_SECTIONS + LIBRARY_SECTIONS:
         R.append(f"   {code} {name:<45} {len(by_dest.get(code, []))}")
+    R += ["", "Temas (sistema de nutrición):",
+          f"   Principales : {', '.join(bmap.get('conditions') or []) or '(ninguno)'}",
+          f"   Secundarios : {', '.join(bmap.get('conditions_secondary') or []) or '(ninguno)'}",
+          f"   Entradas con condition: {len(tagged)} de {len(useful)} útiles para una dieta (secciones {', '.join(TOPIC_SECTIONS)})"]
+    if topic_counts:
+        R.append("   Por tema    : " + ", ".join(f"{k} {v}" for k, v in sorted(topic_counts.items(), key=lambda kv: -kv[1])))
     R += ["", f"Costo total: {money(total)} USD"]
     for k, v in per_stage.items():
         R.append(f"   {k:<10} {money(v)}")
@@ -1244,6 +1317,8 @@ def parse_args():
     ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="Llamadas en paralelo (predeterminado: 3)")
     ap.add_argument("--no-wait", action="store_true",
                     help="En modo lote, no esperar: termina al enviar cada lote (hay que repetir el comando)")
+    ap.add_argument("--allow-no-topics", action="store_true",
+                    help="Aceptar un libro clínico sin temas principales (no recomendado)")
     ap.add_argument("--yes", action="store_true", help="No preguntar antes de gastar")
     args = ap.parse_args()
     return args
@@ -1352,8 +1427,20 @@ def run_once(args):
         map_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     bmap = json.loads(map_file.read_text(encoding="utf-8"))
-    for w in clean_topics(bmap, clinical_topics(prompts["system"])):
+    valid_topics = clinical_topics(prompts["system"])
+    for w in clean_topics(bmap, valid_topics):
         print(f"  AVISO: {w}")
+    bmap["_valid_topics"] = sorted(valid_topics)
+    problem = missing_topics_problem(bmap)
+    if problem and not args.allow_no_topics:
+        # Se aparta el MAP para que el siguiente intento lo repita (cuesta poco) en vez de
+        # gastar toda la extracción en un libro que el sistema de nutrición no podría encontrar.
+        for f in [map_file, map_raw] + sorted(workdir.glob("map_raw_p*.txt")):
+            if f.exists():
+                f.replace(f.with_name(f.name + ".sin_temas"))
+        sys.exit("ERROR: " + problem + " Se guardó el MAP rechazado (archivos .sin_temas en la carpeta de "
+                 "trabajo). Vuelve a correr el mismo comando para repetir solo el MAP; si el libro de verdad "
+                 "no tiene contenido clínico usa --allow-no-topics.")
     units, problems = locate_units(book, bmap.get("units", []))
     for p in problems:
         print(f"  AVISO: {p}")
@@ -1533,6 +1620,9 @@ def run_once(args):
     print(f"  Entradas   : {stats['entries']}  (VERIFY corrigió {stats['corrected']}, agregó {stats['added']}, "
           f"eliminó {stats['deleted']})")
     print(f"  Avisos     : {len(warnings)}   Costo acumulado: {money(total)} USD")
+    for w in warnings:
+        if w.startswith("TEMAS:"):
+            print(f"  ⚠ {w}")
     if errors:
         print(f"\n  ⚠ {len(errors)} problema(s):")
         for e in errors:
