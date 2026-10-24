@@ -2,7 +2,7 @@
 """
 extract.py — Paso 2 del pipeline: libro convertido (.md) → KB (CORE + BIBLIOTECA).
 
-Versión 3.6
+Versión 3.7
 
 CÓMO FUNCIONA
   1. MAP        (Claude)  lee el libro, saca metadatos, dominio, nivel de autoridad
@@ -74,7 +74,7 @@ try:
 except ImportError:
     sys.exit("Falta el SDK de Anthropic. Instala con:  pip install --upgrade anthropic")
 
-EXTRACTOR_VERSION = "3.6"
+EXTRACTOR_VERSION = "3.7"
 
 # ── Modelos y precios (USD por millón de tokens) ─────────────────────────────
 # Fuentes: platform.claude.com/docs y ai.google.dev/gemini-api/docs/pricing (sep 2026).
@@ -941,7 +941,10 @@ def locate_units(book, units, skip_toc=True):
         return sum(1 for j in near if lines[j].strip() in starts and lines[j].strip() != own)
 
     def find_line(start_text, from_idx):
-        target = start_text.strip()
+        # The book is searched line by line, so a `start` that spans several lines (the
+        # MAP sometimes returns two consecutive headings, e.g. "# Title\n\n# Subtitle")
+        # can never match as a whole. Its first non-empty line is used instead.
+        target = next((ln.strip() for ln in start_text.splitlines() if ln.strip()), "")
         if not target:
             return None, False
         for match in (lambda ln: ln.strip() == target, lambda ln: target in ln):
@@ -1178,6 +1181,8 @@ def assemble(workdir, outdir, book, bmap, units, content_units, model, partial, 
                        "unit": "-"}]
 
     covered = [u["id"] for u in content_units if (workdir / f"{u['id']}.extract.txt").exists()]
+    # Coverage is only "complete" when every content unit was really extracted.
+    partial = partial or len(covered) < len(content_units)
     header = [
         "---",
         f"title: {yaml_value(md.get('title', ''))}",
@@ -1446,6 +1451,21 @@ def run_once(args):
         print(f"  AVISO: {p}")
     if not units:
         sys.exit("ERROR: no se pudo ubicar ninguna unidad del MAP en el libro. Revisa map_raw.txt")
+    # A content unit that cannot be located is not skipped quietly: its text would be
+    # folded into the previous unit, extracted in one oversized call and largely lost,
+    # while the KB still claimed complete coverage. Stop before any extraction is paid
+    # for and set the MAP aside so the next run (or Reanudar) repeats only the MAP.
+    found = {u["id"] for u in units}
+    lost = [u["id"] for u in bmap.get("units", [])
+            if u.get("kind") == "content" and u.get("id") not in found]
+    if lost:
+        for f in [map_file, map_raw] + sorted(workdir.glob("map_raw_p*.txt")):
+            if f.exists():
+                f.replace(f.with_name(f.name + ".unidad_perdida"))
+        sys.exit(f"ERROR: el MAP no pudo ubicar en el libro el inicio de {', '.join(lost)}. "
+                 "Sin ese arreglo su texto se mezclaría con el capítulo anterior y se perdería. "
+                 "Se apartó el MAP (archivos .unidad_perdida en la carpeta de trabajo); vuelve a "
+                 "correr el mismo comando (o Reanudar) para repetir solo el MAP.")
     bmap["_unit_warnings"] = [f"MAP: {p}" for p in problems]
     redo = sync_unit_cache(workdir, units, book, bmap.get("units", []))
     if redo:
